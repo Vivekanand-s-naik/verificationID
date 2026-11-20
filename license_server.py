@@ -547,6 +547,30 @@ def reactivate_license(license_key: str, x_admin_token: str | None = Header(defa
     return {"ok": True, "license_key": license_key, "status": "active"}
 
 
+@app.post("/api/v1/admin/expire")
+def force_expire_license(
+    license_key: str = Query(...),
+    x_admin_token: str | None = Header(default=None),
+):
+    """Admin test helper: move a license's expires_at into the past so the expired renewal flow can be tested."""
+    _check_admin(x_admin_token)
+    expired_at = _utc_now() - timedelta(hours=1)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE licenses SET status = 'active', expires_at = %s WHERE license_key = %s",
+                (expired_at, license_key.strip()),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Key not found")
+    return {
+        "ok": True,
+        "license_key": license_key.strip(),
+        "status": "expired",
+        "expires_at": expired_at.isoformat(),
+    }
+
+
 @app.get("/api/v1/admin/list")
 def list_licenses(x_admin_token: str | None = Header(default=None)):
     _check_admin(x_admin_token)

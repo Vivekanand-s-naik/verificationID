@@ -137,6 +137,14 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
+        if norm.startswith("UPDATE licenses SET status = 'active', expires_at = %s WHERE"):
+            exp, key = params
+            if key in self.db.licenses:
+                self.db.licenses[key]["status"] = "active"
+                self.db.licenses[key]["expires_at"] = exp
+                self.rowcount = 1
+            return
+
         if norm.startswith("UPDATE licenses SET status = 'active' WHERE"):
             key = params[0]
             if key in self.db.licenses:
@@ -271,6 +279,21 @@ def test_validate_distinguishes_expired_vs_revoked(env_client):
     client.post("/api/v1/admin/revoke", params={"license_key": "VIVEK-ANPR-0001"}, headers=ADMIN_HDR)
     v_rev = client.post("/api/v1/validate", json={"license_key": "VIVEK-ANPR-0001", "device_id": "d1", "app_version": "1.0.0"})
     assert v_rev.json()["status"] == "revoked"
+
+
+def test_admin_expire_endpoint_forces_expired_status(env_client):
+    client, _ = env_client
+    # Initially active (180-day trial)
+    v1 = client.post("/api/v1/validate", json={"license_key": "VIVEK-ANPR-0001", "device_id": "d1", "app_version": "1.0.0"})
+    assert v1.json()["status"] == "active"
+
+    # Admin expire helper forces expires_at into the past so renewal flow can be tested immediately
+    exp_r = client.post("/api/v1/admin/expire", params={"license_key": "VIVEK-ANPR-0001"}, headers=ADMIN_HDR)
+    assert exp_r.status_code == 200
+    assert exp_r.json()["status"] == "expired"
+
+    v2 = client.post("/api/v1/validate", json={"license_key": "VIVEK-ANPR-0001", "device_id": "d1", "app_version": "1.0.0"})
+    assert v2.json()["status"] == "expired"
 
 
 def test_plans_first_paid_renewal_flag_and_admin_renew(env_client):
