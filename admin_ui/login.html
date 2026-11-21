@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign In — ANPR License Admin</title>
+  <style>
+    :root {
+      --bg: #f3f5f8;
+      --surface: #ffffff;
+      --text: #111827;
+      --muted: #4b5563;
+      --border: #d1d5db;
+      --primary: #1d4ed8;
+      --primary-hover: #1e40af;
+      --danger-bg: #fef2f2;
+      --danger-border: #fecaca;
+      --danger-text: #991b1b;
+      --info-bg: #eff6ff;
+      --info-border: #bfdbfe;
+      --info-text: #1e40af;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.45;
+    }
+    .card {
+      width: 100%;
+      max-width: 400px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 4px 18px rgba(17, 24, 39, 0.06);
+    }
+    .header {
+      margin-bottom: 20px;
+    }
+    .title {
+      margin: 0 0 4px;
+      font-size: 1.35rem;
+      font-weight: 700;
+    }
+    .subtitle {
+      margin: 0;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+    .banner {
+      display: none;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      border: 1px solid transparent;
+    }
+    .banner.visible { display: block; }
+    .banner.error {
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+      color: var(--danger-text);
+    }
+    .banner.info {
+      background: var(--info-bg);
+      border-color: var(--info-border);
+      color: var(--info-text);
+    }
+    .field {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      min-height: 46px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 16px;
+      color: var(--text);
+      background: #fff;
+    }
+    input:focus {
+      outline: 2px solid rgba(29, 78, 216, 0.25);
+      border-color: var(--primary);
+    }
+    .password-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .password-wrap input {
+      padding-right: 70px;
+    }
+    .toggle-pw {
+      position: absolute;
+      right: 6px;
+      min-height: 36px;
+      padding: 0 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #f9fafb;
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .submit-btn {
+      width: 100%;
+      min-height: 48px;
+      border: none;
+      border-radius: 8px;
+      background: var(--primary);
+      color: #ffffff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .submit-btn:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    .submit-btn:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="header">
+      <h1 class="title">ANPR License Admin</h1>
+      <p class="subtitle">Sign in to manage licenses and payment approvals.</p>
+    </div>
+
+    <div id="status-banner" class="banner info" role="status"></div>
+    <div id="error-banner" class="banner error" role="alert"></div>
+
+    <form id="login-form" novalidate>
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="password-wrap">
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <button type="button" id="toggle-pw" class="toggle-pw" aria-label="Show password">Show</button>
+        </div>
+      </div>
+
+      <button type="submit" id="submit-btn" class="submit-btn">Sign In</button>
+    </form>
+  </main>
+
+  <script>
+    (function () {
+      const TOKEN_KEY = "anpr_admin_token";
+      const EXPIRES_KEY = "anpr_admin_expires_at";
+
+      const params = new URLSearchParams(window.location.search);
+      const statusBanner = document.getElementById("status-banner");
+      const errorBanner = document.getElementById("error-banner");
+      const form = document.getElementById("login-form");
+      const usernameInput = document.getElementById("username");
+      const passwordInput = document.getElementById("password");
+      const togglePwBtn = document.getElementById("toggle-pw");
+      const submitBtn = document.getElementById("submit-btn");
+
+      if (params.get("expired") === "1") {
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(EXPIRES_KEY);
+        statusBanner.textContent = "Your session has expired. Please sign in again.";
+        statusBanner.classList.add("visible");
+      } else if (params.get("logged_out") === "1") {
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(EXPIRES_KEY);
+        statusBanner.textContent = "You have been signed out.";
+        statusBanner.classList.add("visible");
+      }
+
+      togglePwBtn.addEventListener("click", function () {
+        const show = passwordInput.type === "password";
+        passwordInput.type = show ? "text" : "password";
+        togglePwBtn.textContent = show ? "Hide" : "Show";
+        togglePwBtn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      });
+
+      function showError(msg) {
+        errorBanner.textContent = msg;
+        errorBanner.classList.add("visible");
+      }
+
+      function clearError() {
+        errorBanner.textContent = "";
+        errorBanner.classList.remove("visible");
+      }
+
+      form.addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        clearError();
+
+        const username = usernameInput.value.trim();
+        const password = passwordInput.value;
+        if (!username || !password) {
+          showError("Please enter both username and password.");
+          return;
+        }
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Signing in...";
+
+        try {
+          const resp = await fetch("/api/v1/admin/login", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username, password: password }),
+          });
+          const data = await resp.json().catch(function () { return {}; });
+          if (!resp.ok) {
+            showError(data.detail || "Sign in failed. Please check your credentials.");
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Sign In";
+            return;
+          }
+
+          if (data.token) {
+            sessionStorage.setItem(TOKEN_KEY, data.token);
+          }
+          if (data.expires_at) {
+            sessionStorage.setItem(EXPIRES_KEY, data.expires_at);
+          }
+          window.location.replace("/admin");
+        } catch (_err) {
+          showError("Network error while signing in. Please try again.");
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Sign In";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

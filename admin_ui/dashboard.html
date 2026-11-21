@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — ANPR License Admin</title>
+  <style>
+    :root {
+      --bg: #f3f5f8;
+      --surface: #ffffff;
+      --surface-alt: #f9fafb;
+      --text: #111827;
+      --muted: #4b5563;
+      --border: #d1d5db;
+      --primary: #1d4ed8;
+      --primary-hover: #1e40af;
+      --success: #15803d;
+      --success-bg: #dcfce7;
+      --danger: #b91c1c;
+      --danger-bg: #fee2e2;
+      --warn: #b45309;
+      --warn-bg: #fef3c7;
+      --neutral-bg: #e5e7eb;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.45;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+    }
+    .topbar-inner {
+      max-width: 1180px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 700;
+    }
+    .session-meta {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    button, select, input {
+      font-family: inherit;
+    }
+    .btn {
+      min-height: 44px;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn:hover:not(:disabled) {
+      background: var(--surface-alt);
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    .btn-success {
+      background: var(--success);
+      border-color: var(--success);
+      color: #fff;
+    }
+    .btn-success:hover:not(:disabled) {
+      background: #166534;
+    }
+    .btn-danger {
+      background: var(--danger);
+      border-color: var(--danger);
+      color: #fff;
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: #991b1b;
+    }
+    .btn-sm {
+      min-height: 38px;
+      padding: 6px 10px;
+      font-size: 0.85rem;
+    }
+    .container {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      min-height: 44px;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .tab-btn.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+    .count-pill {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      background: rgba(17, 24, 39, 0.1);
+      color: inherit;
+    }
+    .tab-btn.active .count-pill {
+      background: rgba(255, 255, 255, 0.22);
+    }
+    .panel {
+      display: none;
+    }
+    .panel.active {
+      display: block;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      margin: 0 0 12px;
+      font-size: 1.02rem;
+      font-weight: 700;
+    }
+    .toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      left: 16px;
+      max-width: 440px;
+      margin-left: auto;
+      z-index: 50;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #111827;
+      color: #ffffff;
+      font-size: 0.92rem;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+      display: none;
+    }
+    .toast.visible { display: block; }
+    .toast.error {
+      background: #991b1b;
+      border-color: #7f1d1d;
+    }
+    .toast.success {
+      background: #166534;
+      border-color: #14532d;
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+    .badge-active, .badge-approved {
+      background: var(--success-bg);
+      color: var(--success);
+    }
+    .badge-revoked, .badge-rejected {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+    .badge-expired {
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+    .badge-pending {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+    .empty-state {
+      background: var(--surface);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 28px 16px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .grid-cards {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    @media (min-width: 820px) {
+      .grid-cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    .sub-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .sub-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .sub-id {
+      font-size: 0.85rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }
+    .kv-list {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 12px;
+      font-size: 0.9rem;
+    }
+    .kv-label {
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .thumb-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #f9fafb;
+      padding: 6px;
+      text-align: center;
+    }
+    .thumb-img {
+      max-width: 100%;
+      max-height: 260px;
+      object-fit: contain;
+      border-radius: 6px;
+      cursor: zoom-in;
+      display: block;
+      margin: 0 auto;
+    }
+    .thumb-hint {
+      margin-top: 6px;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .sub-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: auto;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    @media (min-width: 720px) {
+      .form-grid {
+        grid-template-columns: 1.3fr 1.5fr auto;
+        align-items: end;
+      }
+    }
+    .field label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 0.86rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .field input,
+    .search-input,
+    .plan-select {
+      width: 100%;
+      min-height: 44px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 16px;
+      background: #fff;
+      color: var(--text);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .search-input {
+      max-width: 340px;
+    }
+    .filter-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .pill-btn {
+      min-height: 38px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pill-btn.active {
+      background: #111827;
+      border-color: #111827;
+      color: #ffffff;
+    }
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    table.lic-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    table.lic-table th,
+    table.lic-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      vertical-align: top;
+    }
+    table.lic-table th {
+      background: var(--surface-alt);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+    table.lic-table tr:last-child td {
+      border-bottom: none;
+    }
+    .row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .renew-group {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .plan-select {
+      width: auto;
+      min-width: 165px;
+      min-height: 38px;
+      font-size: 0.88rem;
+      padding: 4px 8px;
+    }
+    @media (max-width: 859px) {
+      .table-wrap {
+        background: transparent;
+        border: none;
+      }
+      table.lic-table thead {
+        display: none;
+      }
+      table.lic-table,
+      table.lic-table tbody,
+      table.lic-table tr,
+      table.lic-table td {
+        display: block;
+        width: 100%;
+      }
+      table.lic-table tr {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      table.lic-table td {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 6px 0;
+        border-bottom: 1px solid #f3f4f6;
+      }
+      table.lic-table td::before {
+        content: attr(data-label);
+        font-weight: 600;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+      table.lic-table td:last-child {
+        display: block;
+        border-bottom: none;
+        padding-top: 10px;
+      }
+      table.lic-table td:last-child::before {
+        display: block;
+        margin-bottom: 8px;
+      }
+      .plan-select {
+        flex: 1 1 160px;
+        min-height: 42px;
+      }
+      .btn-sm {
+        min-height: 42px;
+      }
+    }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(17, 24, 39, 0.84);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-backdrop.open {
+      display: flex;
+    }
+    .modal-content {
+      max-width: 96vw;
+      max-height: 92vh;
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .modal-img {
+      max-width: 90vw;
+      max-height: 75vh;
+      object-fit: contain;
+      border-radius: 6px;
+      background: #111827;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>ANPR License Admin</h1>
+        <div id="session-meta" class="session-meta">Loading session...</div>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" id="refresh-btn" class="btn">Refresh</button>
+        <button type="button" id="logout-btn" class="btn">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs" role="tablist" aria-label="Admin sections">
+      <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="pending">
+        Pending Payments <span id="pending-count" class="count-pill">0</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="licenses">
+        Licenses <span id="licenses-count" class="count-pill">0</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
+        History <span id="history-count" class="count-pill">0</span>
+      </button>
+    </nav>
+
+    <section id="panel-pending" class="panel active" role="tabpanel">
+      <div id="pending-list"></div>
+    </section>
+
+    <section id="panel-licenses" class="panel" role="tabpanel">
+      <div class="card">
+        <h2 class="card-title">Create New License</h2>
+        <form id="create-license-form" class="form-grid">
+          <div class="field">
+            <label for="new-license-key">License Key</label>
+            <input id="new-license-key" type="text" placeholder="e.g. VIVEK-ANPR-0002" required />
+          </div>
+          <div class="field">
+            <label for="new-license-note">Note (optional)</label>
+            <input id="new-license-note" type="text" placeholder="Customer or gate location" />
+          </div>
+          <button type="submit" id="create-license-btn" class="btn btn-primary">Create License</button>
+        </form>
+      </div>
+
+      <div class="toolbar">
+        <input id="license-search" class="search-input" type="search" placeholder="Filter by key, device ID, or note..." aria-label="Filter licenses" />
+      </div>
+      <div id="licenses-container"></div>
+    </section>
+
+    <section id="panel-history" class="panel" role="tabpanel">
+      <div class="filter-pills">
+        <button type="button" class="pill-btn active" data-history-filter="all">All Reviewed</button>
+        <button type="button" class="pill-btn" data-history-filter="approved">Approved</button>
+        <button type="button" class="pill-btn" data-history-filter="rejected">Rejected</button>
+      </div>
+      <div id="history-list"></div>
+    </section>
+  </main>
+
+  <div id="lightbox" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment screenshot preview">
+    <div class="modal-content">
+      <div class="modal-head">
+        <strong id="lightbox-title">Payment Screenshot</strong>
+        <div style="display:flex; gap:8px;">
+          <a id="lightbox-raw-link" class="btn btn-sm" target="_blank" rel="noopener noreferrer">Open Full Image</a>
+          <button type="button" id="lightbox-close" class="btn btn-sm">Close</button>
+        </div>
+      </div>
+      <img id="lightbox-img" class="modal-img" alt="Payment screenshot" />
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (function () {
+      const TOKEN_KEY = "anpr_admin_token";
+      const EXPIRES_KEY = "anpr_admin_expires_at";
+
+      const state = {
+        activeTab: "pending",
+        historyFilter: "all",
+        plans: {},
+        pending: [],
+        licenses: [],
+        history: [],
+        licenseSearch: "",
+      };
+
+      const toastEl = document.getElementById("toast");
+      let toastTimer = null;
+
+      function showToast(message, kind) {
+        toastEl.textContent = message;
+        toastEl.className = "toast visible " + (kind || "");
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+          toastEl.classList.remove("visible");
+        }, 4000);
+      }
+
+      function escapeHtml(val) {
+        if (val === null || val === undefined) return "";
+        return String(val)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function safeDataUri(uri) {
+        if (typeof uri !== "string") return "";
+        const match = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(uri);
+        return match ? uri : "";
+      }
+
+      function redirectToLogin(expired) {
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(EXPIRES_KEY);
+        window.location.replace(expired ? "/admin/login?expired=1" : "/admin/login?logged_out=1");
+      }
+
+      async function apiFetch(url, options) {
+        const opts = Object.assign({ credentials: "same-origin" }, options || {});
+        const headers = new Headers(opts.headers || {});
+        const storedToken = sessionStorage.getItem(TOKEN_KEY);
+        if (storedToken && !headers.has("Authorization")) {
+          headers.set("Authorization", "Bearer " + storedToken);
+        }
+        opts.headers = headers;
+
+        const resp = await fetch(url, opts);
+        if (resp.status === 401) {
+          redirectToLogin(true);
+          throw new Error("Session expired");
+        }
+        const contentType = resp.headers.get("content-type") || "";
+        const data = contentType.includes("application/json")
+          ? await resp.json().catch(function () { return {}; })
+          : {};
+        if (!resp.ok) {
+          throw new Error(data.detail || ("Request failed (" + resp.status + ")"));
+        }
+        return data;
+      }
+
+      function formatRelative(iso) {
+        if (!iso) return "";
+        const dt = new Date(iso);
+        if (Number.isNaN(dt.getTime())) return "";
+        const diffMs = dt.getTime() - Date.now();
+        const absSec = Math.round(Math.abs(diffMs) / 1000);
+        const past = diffMs < 0;
+        if (absSec < 60) return past ? "just now" : "in <1m";
+        const mins = Math.round(absSec / 60);
+        if (mins < 60) return past ? mins + "m ago" : "in " + mins + "m";
+        const hrs = Math.round(mins / 60);
+        if (hrs < 48) return past ? hrs + "h ago" : "in " + hrs + "h";
+        const days = Math.round(hrs / 24);
+        return past ? days + "d ago" : "in " + days + "d";
+      }
+
+      function formatDate(iso) {
+        if (!iso) return "—";
+        const dt = new Date(iso);
+        if (Number.isNaN(dt.getTime())) return escapeHtml(iso);
+        const formatted = dt.toLocaleString(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        const rel = formatRelative(iso);
+        return rel ? formatted + " (" + rel + ")" : formatted;
+      }
+
+      function effectiveLicenseStatus(lic) {
+        const raw = (lic.status || "").toLowerCase();
+        if (raw === "revoked") return "revoked";
+        if (raw === "expired") return "expired";
+        if (lic.expires_at) {
+          const exp = new Date(lic.expires_at);
+          if (!Number.isNaN(exp.getTime()) && exp.getTime() <= Date.now()) {
+            return "expired";
+          }
+        }
+        return raw || "active";
+      }
+
+      function setActiveTab(tabName) {
+        state.activeTab = tabName;
+        document.querySelectorAll(".tab-btn").forEach(function (btn) {
+          const active = btn.dataset.tab === tabName;
+          btn.classList.toggle("active", active);
+          btn.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        document.querySelectorAll(".panel").forEach(function (panel) {
+          panel.classList.toggle("active", panel.id === "panel-" + tabName);
+        });
+      }
+
+      function openLightbox(sub) {
+        const src = safeDataUri(sub.image_data_uri);
+        if (!src) return;
+        document.getElementById("lightbox-title").textContent =
+          "Submission #" + sub.id + " — " + (sub.license_key || "");
+        document.getElementById("lightbox-img").src = src;
+        document.getElementById("lightbox-raw-link").href =
+          "/api/v1/admin/payment-submissions/" + encodeURIComponent(sub.id) + "/image";
+        document.getElementById("lightbox").classList.add("open");
+      }
+
+      function closeLightbox() {
+        document.getElementById("lightbox").classList.remove("open");
+        document.getElementById("lightbox-img").removeAttribute("src");
+      }
+
+      function renderPending() {
+        document.getElementById("pending-count").textContent = String(state.pending.length);
+        const root = document.getElementById("pending-list");
+        if (!state.pending.length) {
+          root.innerHTML = '<div class="empty-state">No pending payment submissions right now.</div>';
+          return;
+        }
+
+        const html = state.pending.map(function (sub) {
+          const imgUri = safeDataUri(sub.image_data_uri);
+          const priceTxt = sub.price_inr !== null && sub.price_inr !== undefined ? "₹" + escapeHtml(sub.price_inr) : "—";
+          const planTxt = escapeHtml(sub.plan_label || sub.claimed_plan) +
+            " (" + escapeHtml(sub.claimed_plan) + ", " + priceTxt + ")";
+          return (
+            '<article class="sub-card" data-sub-id="' + escapeHtml(sub.id) + '">' +
+              '<div class="sub-head">' +
+                '<div>' +
+                  '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
+                  '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
+                '</div>' +
+                '<span class="badge badge-pending">Pending</span>' +
+              '</div>' +
+              '<div class="kv-list">' +
+                '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
+                '<span class="kv-label">Plan</span><span>' + planTxt + '</span>' +
+                '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
+              '</div>' +
+              (imgUri
+                ? '<div class="thumb-wrap">' +
+                    '<img class="thumb-img" src="' + imgUri + '" alt="Payment screenshot #' + escapeHtml(sub.id) + '" data-action="zoom" />' +
+                    '<div class="thumb-hint">Tap screenshot to enlarge</div>' +
+                  '</div>'
+                : '<div class="empty-state">Screenshot unavailable</div>') +
+              '<div class="sub-actions">' +
+                '<button type="button" class="btn btn-success" data-action="approve">Approve</button>' +
+                '<button type="button" class="btn btn-danger" data-action="reject">Reject</button>' +
+              '</div>' +
+            '</article>'
+          );
+        }).join("");
+
+        root.innerHTML = '<div class="grid-cards">' + html + '</div>';
+      }
+
+      function renderPlanOptions(selectedPlan) {
+        const keys = Object.keys(state.plans || {});
+        if (!keys.length) {
+          return '<option value="monthly">Monthly</option>';
+        }
+        return keys.map(function (k) {
+          const meta = state.plans[k] || {};
+          const label = (meta.label || k) + " (₹" + (meta.price_inr ?? "?") + " / " + (meta.days ?? "?") + "d)";
+          const selected = k === selectedPlan ? " selected" : "";
+          return '<option value="' + escapeHtml(k) + '"' + selected + '>' + escapeHtml(label) + '</option>';
+        }).join("");
+      }
+
+      function renderLicenses() {
+        document.getElementById("licenses-count").textContent = String(state.licenses.length);
+        const root = document.getElementById("licenses-container");
+        const query = state.licenseSearch.trim().toLowerCase();
+        const filtered = state.licenses.filter(function (lic) {
+          if (!query) return true;
+          return (
+            (lic.license_key || "").toLowerCase().includes(query) ||
+            (lic.device_id || "").toLowerCase().includes(query) ||
+            (lic.note || "").toLowerCase().includes(query)
+          );
+        });
+
+        if (!filtered.length) {
+          root.innerHTML = '<div class="empty-state">No licenses match your view.</div>';
+          return;
+        }
+
+        const rowsHtml = filtered.map(function (lic) {
+          const eff = effectiveLicenseStatus(lic);
+          const badgeCls = eff === "revoked" ? "badge-revoked" : (eff === "expired" ? "badge-expired" : "badge-active");
+          const defaultPlan = state.plans && state.plans[lic.plan] ? lic.plan : "monthly";
+          const isRevoked = (lic.status || "").toLowerCase() === "revoked";
+          return (
+            '<tr data-license-key="' + escapeHtml(lic.license_key) + '">' +
+              '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
+              '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(eff) + '</span></td>' +
+              '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
+              '<td data-label="Expires At">' + escapeHtml(formatDate(lic.expires_at)) + '</td>' +
+              '<td data-label="Device ID"><span class="mono">' + escapeHtml(lic.device_id || "—") + '</span></td>' +
+              '<td data-label="Last Seen">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
+              '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
+              '<td data-label="Actions">' +
+                '<div class="row-actions">' +
+                  (isRevoked
+                    ? '<button type="button" class="btn btn-success btn-sm" data-lic-action="reactivate">Reactivate</button>'
+                    : '<button type="button" class="btn btn-danger btn-sm" data-lic-action="revoke">Revoke</button>' +
+                      '<button type="button" class="btn btn-sm" data-lic-action="reactivate">Reactivate</button>') +
+                  '<div class="renew-group">' +
+                    '<select class="plan-select" aria-label="Renewal plan for ' + escapeHtml(lic.license_key) + '">' +
+                      renderPlanOptions(defaultPlan) +
+                    '</select>' +
+                    '<button type="button" class="btn btn-primary btn-sm" data-lic-action="renew">Renew</button>' +
+                  '</div>' +
+                '</div>' +
+              '</td>' +
+            '</tr>'
+          );
+        }).join("");
+
+        root.innerHTML =
+          '<div class="table-wrap">' +
+            '<table class="lic-table">' +
+              '<thead><tr>' +
+                '<th>License Key</th>' +
+                '<th>Status</th>' +
+                '<th>Plan</th>' +
+                '<th>Expires At</th>' +
+                '<th>Device ID</th>' +
+                '<th>Last Seen</th>' +
+                '<th>Note</th>' +
+                '<th>Actions</th>' +
+              '</tr></thead>' +
+              '<tbody>' + rowsHtml + '</tbody>' +
+            '</table>' +
+          '</div>';
+      }
+
+      function renderHistory() {
+        document.getElementById("history-count").textContent = String(state.history.length);
+        const root = document.getElementById("history-list");
+        const items = state.history.filter(function (sub) {
+          if (state.historyFilter === "all") return true;
+          return (sub.status || "").toLowerCase() === state.historyFilter;
+        });
+
+        if (!items.length) {
+          root.innerHTML = '<div class="empty-state">No reviewed submissions found.</div>';
+          return;
+        }
+
+        const html = items.map(function (sub) {
+          const st = (sub.status || "").toLowerCase();
+          const badgeCls = st === "approved" ? "badge-approved" : "badge-rejected";
+          const imgUri = safeDataUri(sub.image_data_uri);
+          const priceTxt = sub.price_inr !== null && sub.price_inr !== undefined ? "₹" + escapeHtml(sub.price_inr) : "—";
+          return (
+            '<article class="sub-card" data-history-id="' + escapeHtml(sub.id) + '">' +
+              '<div class="sub-head">' +
+                '<div>' +
+                  '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
+                  '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
+                '</div>' +
+                '<span class="badge ' + badgeCls + '">' + escapeHtml(st) + '</span>' +
+              '</div>' +
+              '<div class="kv-list">' +
+                '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
+                '<span class="kv-label">Plan</span><span>' + escapeHtml(sub.plan_label || sub.claimed_plan) + ' (' + priceTxt + ')</span>' +
+                '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
+              '</div>' +
+              (imgUri
+                ? '<div class="thumb-wrap">' +
+                    '<img class="thumb-img" src="' + imgUri + '" alt="Reviewed screenshot #' + escapeHtml(sub.id) + '" data-history-zoom="1" />' +
+                  '</div>'
+                : '') +
+            '</article>'
+          );
+        }).join("");
+
+        root.innerHTML = '<div class="grid-cards">' + html + '</div>';
+      }
+
+      async function loadPending() {
+        state.pending = await apiFetch("/api/v1/admin/payment-submissions?status=pending");
+        renderPending();
+      }
+
+      async function loadLicenses() {
+        state.licenses = await apiFetch("/api/v1/admin/list");
+        renderLicenses();
+      }
+
+      async function loadHistory() {
+        const all = await apiFetch("/api/v1/admin/payment-submissions?status=all");
+        state.history = all.filter(function (s) {
+          const st = (s.status || "").toLowerCase();
+          return st === "approved" || st === "rejected";
+        });
+        renderHistory();
+      }
+
+      async function loadAllData() {
+        const session = await apiFetch("/api/v1/admin/session");
+        state.plans = session.plans || {};
+        document.getElementById("session-meta").textContent =
+          "Signed in as " + (session.username || "admin") +
+          (session.expires_at ? " • Session expires " + formatDate(session.expires_at) : "");
+
+        await Promise.all([loadPending(), loadLicenses(), loadHistory()]);
+      }
+
+      document.querySelectorAll(".tab-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          setActiveTab(btn.dataset.tab);
+        });
+      });
+
+      document.querySelectorAll("[data-history-filter]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          state.historyFilter = btn.dataset.historyFilter;
+          document.querySelectorAll("[data-history-filter]").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          renderHistory();
+        });
+      });
+
+      document.getElementById("license-search").addEventListener("input", function (evt) {
+        state.licenseSearch = evt.target.value || "";
+        renderLicenses();
+      });
+
+      document.getElementById("refresh-btn").addEventListener("click", async function () {
+        const btn = document.getElementById("refresh-btn");
+        btn.disabled = true;
+        try {
+          await loadAllData();
+          showToast("Refreshed.", "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById("logout-btn").addEventListener("click", async function () {
+        const btn = document.getElementById("logout-btn");
+        btn.disabled = true;
+        try {
+          await fetch("/api/v1/admin/logout", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: sessionStorage.getItem(TOKEN_KEY)
+              ? { Authorization: "Bearer " + sessionStorage.getItem(TOKEN_KEY) }
+              : {},
+          });
+        } catch (_e) {
+          // Proceed with local cleanup and redirect
+        }
+        redirectToLogin(false);
+      });
+
+      document.getElementById("create-license-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const keyInput = document.getElementById("new-license-key");
+        const noteInput = document.getElementById("new-license-note");
+        const btn = document.getElementById("create-license-btn");
+        const licenseKey = keyInput.value.trim();
+        const note = noteInput.value.trim();
+        if (!licenseKey) {
+          showToast("License key is required.", "error");
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/v1/admin/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ license_key: licenseKey, note: note || null }),
+          });
+          keyInput.value = "";
+          noteInput.value = "";
+          await loadLicenses();
+          showToast("Created license " + licenseKey, "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById("pending-list").addEventListener("click", async function (evt) {
+        const zoomTarget = evt.target.closest("[data-action='zoom']");
+        if (zoomTarget) {
+          const card = zoomTarget.closest("[data-sub-id]");
+          const id = Number(card && card.dataset.subId);
+          const sub = state.pending.find(function (item) { return item.id === id; });
+          if (sub) openLightbox(sub);
+          return;
+        }
+
+        const actionBtn = evt.target.closest("button[data-action]");
+        if (!actionBtn) return;
+        const action = actionBtn.dataset.action;
+        if (action !== "approve" && action !== "reject") return;
+
+        const card = actionBtn.closest("[data-sub-id]");
+        const id = Number(card && card.dataset.subId);
+        const sub = state.pending.find(function (item) { return item.id === id; });
+        if (!sub) return;
+
+        const promptText = action === "approve"
+          ? "Approve payment #" + id + " for " + sub.license_key + " (" + sub.claimed_plan + ")?"
+          : "Reject payment #" + id + " for " + sub.license_key + "?";
+        if (!window.confirm(promptText)) return;
+
+        const buttons = card.querySelectorAll("button[data-action]");
+        buttons.forEach(function (b) { b.disabled = true; });
+
+        try {
+          const res = await apiFetch(
+            "/api/v1/admin/payment-submissions/" + encodeURIComponent(id) + "/" + action,
+            { method: "POST" }
+          );
+          state.pending = state.pending.filter(function (item) { return item.id !== id; });
+          renderPending();
+          if (action === "approve") {
+            const expTxt = res.renewal && res.renewal.expires_at
+              ? " (expires " + formatDate(res.renewal.expires_at) + ")"
+              : "";
+            showToast("Approved #" + id + " for " + sub.license_key + expTxt, "success");
+          } else {
+            showToast("Rejected submission #" + id, "success");
+          }
+          Promise.all([loadLicenses(), loadHistory()]).catch(function () {});
+        } catch (err) {
+          buttons.forEach(function (b) { b.disabled = false; });
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        }
+      });
+
+      document.getElementById("licenses-container").addEventListener("click", async function (evt) {
+        const btn = evt.target.closest("button[data-lic-action]");
+        if (!btn) return;
+        const row = btn.closest("[data-license-key]");
+        const licenseKey = row && row.dataset.licenseKey;
+        if (!licenseKey) return;
+        const action = btn.dataset.licAction;
+
+        if (action === "revoke" && !window.confirm("Revoke license " + licenseKey + "?")) {
+          return;
+        }
+
+        let url = "";
+        if (action === "revoke") {
+          url = "/api/v1/admin/revoke?license_key=" + encodeURIComponent(licenseKey);
+        } else if (action === "reactivate") {
+          url = "/api/v1/admin/reactivate?license_key=" + encodeURIComponent(licenseKey);
+        } else if (action === "renew") {
+          const sel = row.querySelector(".plan-select");
+          const plan = sel ? sel.value : "monthly";
+          if (!window.confirm("Renew " + licenseKey + " with plan '" + plan + "'?")) {
+            return;
+          }
+          url = "/api/v1/admin/renew?license_key=" + encodeURIComponent(licenseKey) +
+                "&plan=" + encodeURIComponent(plan);
+        } else {
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          await apiFetch(url, { method: "POST" });
+          await loadLicenses();
+          showToast("Updated " + licenseKey + " (" + action + ")", "success");
+        } catch (err) {
+          btn.disabled = false;
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        }
+      });
+
+      document.getElementById("history-list").addEventListener("click", function (evt) {
+        const img = evt.target.closest("[data-history-zoom]");
+        if (!img) return;
+        const card = img.closest("[data-history-id]");
+        const id = Number(card && card.dataset.historyId);
+        const sub = state.history.find(function (item) { return item.id === id; });
+        if (sub) openLightbox(sub);
+      });
+
+      document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+      document.getElementById("lightbox").addEventListener("click", function (evt) {
+        if (evt.target.id === "lightbox") closeLightbox();
+      });
+      document.addEventListener("keydown", function (evt) {
+        if (evt.key === "Escape") closeLightbox();
+      });
+
+      loadAllData().catch(function (err) {
+        if (err.message !== "Session expired") {
+          showToast(err.message || "Failed to load dashboard.", "error");
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

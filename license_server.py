@@ -1,14 +1,20 @@
 import base64
+import hashlib
 import hmac
+import json
 import logging
 import os
+import secrets
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 import requests
-from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger("license_server")
@@ -20,6 +26,17 @@ ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN")
 TRIAL_DAYS = 180
 SCREENSHOT_RATE_LIMIT_MINUTES = 10
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024  # 5 MB
+
+ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
+SESSION_COOKIE_NAME = "admin_session"
+SESSION_TTL_SECONDS = int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", str(4 * 3600)))
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 10
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+ADMIN_PAGE_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+)
 
 PLANS = {
     "monthly":   {"days": 30,  "price_inr": 150, "label": "Monthly"},
@@ -123,6 +140,20 @@ def init_db():
                 ON payment_submissions (status, submitted_at DESC)
             """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    jti TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    revoked_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
+                ON admin_sessions (expires_at)
+            """)
+
 
 if os.environ.get("SKIP_INIT_DB_ON_IMPORT") != "1":
     if not DATABASE_URL:
@@ -130,10 +161,210 @@ if os.environ.get("SKIP_INIT_DB_ON_IMPORT") != "1":
     init_db()
 
 
+@app.middleware("http")
+async def add_admin_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith(("/admin", "/api/v1/admin")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if path in ("/admin", "/admin/", "/admin/login") and "Content-Security-Policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = ADMIN_PAGE_CSP
+    return response
+
+
+def _get_admin_token() -> str | None:
+    raw = os.environ["LICENSE_ADMIN_TOKEN"] if "LICENSE_ADMIN_TOKEN" in os.environ else ADMIN_TOKEN
+    return (raw or "").strip() or None
+
+
 def _check_admin(token: str | None):
-    expected = os.environ.get("LICENSE_ADMIN_TOKEN") or ADMIN_TOKEN
+    expected = _get_admin_token()
     if not expected or not token or not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _get_admin_credentials() -> tuple[str | None, str | None]:
+    username = (os.environ.get("ADMIN_USERNAME") or "").strip()
+    password = os.environ.get("ADMIN_PASSWORD") or ""
+    if not username or not password:
+        return None, None
+    return username, password
+
+
+def _get_session_signing_key() -> bytes:
+    secret = (os.environ.get("ADMIN_SESSION_SECRET") or _get_admin_token() or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Admin authentication is not configured.")
+    return hashlib.sha256(f"anpr-admin-session-v1:{secret}".encode("utf-8")).digest()
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(val: str) -> bytes:
+    padded = val + ("=" * (-len(val) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _sign_session_token(username: str, jti: str, issued_at: datetime, expires_at: datetime) -> str:
+    key = _get_session_signing_key()
+    header_b64 = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8"))
+    payload = {
+        "sub": username,
+        "jti": jti,
+        "iat": int(issued_at.timestamp()),
+        "exp": int(expires_at.timestamp()),
+    }
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    sig = hmac.new(key, signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url_encode(sig)}"
+
+
+def _decode_session_token(token: str, verify_exp: bool = True) -> dict | None:
+    if not token or not isinstance(token, str) or token.count(".") != 2:
+        return None
+    header_b64, payload_b64, sig_b64 = token.split(".", 2)
+    try:
+        key = _get_session_signing_key()
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        expected_sig = hmac.new(key, signing_input, hashlib.sha256).digest()
+        provided_sig = _b64url_decode(sig_b64)
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            return None
+        header = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(header, dict) or header.get("alg") != "HS256" or header.get("typ") != "JWT":
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    sub = payload.get("sub")
+    jti = payload.get("jti")
+    iat = payload.get("iat")
+    exp = payload.get("exp")
+    if not isinstance(sub, str) or not sub or not isinstance(jti, str) or not jti:
+        return None
+    if not isinstance(iat, int) or isinstance(iat, bool) or not isinstance(exp, int) or isinstance(exp, bool):
+        return None
+    if verify_exp and int(_utc_now().timestamp()) >= exp:
+        return None
+    return payload
+
+
+def _verify_active_session(token: str | None) -> dict | None:
+    if not token:
+        return None
+    payload = _decode_session_token(token, verify_exp=True)
+    if payload is None:
+        return None
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT jti, username, expires_at, revoked_at FROM admin_sessions WHERE jti = %s",
+                (payload["jti"],),
+            )
+            row = cur.fetchone()
+
+    if row is None or row.get("revoked_at") is not None:
+        return None
+    expires_at = _as_utc(row.get("expires_at"))
+    if expires_at is None or expires_at <= _utc_now():
+        return None
+    if not hmac.compare_digest(str(row.get("username") or ""), payload["sub"]):
+        return None
+    return {
+        "jti": row["jti"],
+        "username": row["username"],
+        "expires_at": _iso_utc(expires_at),
+    }
+
+
+def _extract_session_token(request: Request) -> tuple[str | None, str | None]:
+    auth_hdr = request.headers.get("authorization")
+    if auth_hdr is not None:
+        parts = auth_hdr.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+            return parts[1].strip(), "header"
+        return "", "header"
+    cookie_val = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_val is not None:
+        return cookie_val, "cookie"
+    return None, None
+
+
+def _is_https_request(request: Request) -> bool:
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.client.host if request.client else "unknown"
+
+
+def _prune_login_attempts(ip: str, now_ts: float) -> list[float]:
+    cutoff = now_ts - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in _LOGIN_ATTEMPTS.get(ip, []) if ts > cutoff]
+    if recent:
+        _LOGIN_ATTEMPTS[ip] = recent
+    else:
+        _LOGIN_ATTEMPTS.pop(ip, None)
+    return recent
+
+
+def _check_login_rate_limit(ip: str):
+    recent = _prune_login_attempts(ip, time.monotonic())
+    if len(recent) >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Please try again later.",
+        )
+
+
+def _record_login_failure(ip: str):
+    now_ts = time.monotonic()
+    recent = _prune_login_attempts(ip, now_ts)
+    recent.append(now_ts)
+    _LOGIN_ATTEMPTS[ip] = recent
+
+
+def _clear_login_failures(ip: str):
+    _LOGIN_ATTEMPTS.pop(ip, None)
+
+
+def _require_admin_session(request: Request) -> dict:
+    token, _ = _extract_session_token(request)
+    session = _verify_active_session(token)
+    if session is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    _check_admin(_get_admin_token())
+    return session
+
+
+def _require_admin_api(request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
+    token, source = _extract_session_token(request)
+    if source is not None:
+        session = _verify_active_session(token)
+        if session is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
+        _check_admin(_get_admin_token())
+        return session
+    if x_admin_token is not None:
+        _check_admin(x_admin_token)
+        return {"auth_type": "admin_token"}
+    raise HTTPException(status_code=401, detail="Authentication required.")
 
 
 def _is_first_paid_renewal(row: dict | None) -> bool:
@@ -229,15 +460,14 @@ def _send_telegram_payment_notification(
     days = plan_info.get("days", "?")
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(content_type, "png")
 
+    base_url = (os.environ.get("PUBLIC_BASE_URL") or "https://verificationid.onrender.com").rstrip("/")
     caption = (
         f"ANPR Payment Verification Required (#{submission_id})\n"
         f"License Key: {license_key}\n"
         f"Device ID: {device_id}\n"
         f"Claimed Plan: {claimed_plan} ({label} — Rs.{price} / {days}d)\n"
         f"Submitted (UTC): {submitted_at.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-        f"Verify in your UPI/bank app, then approve or reject via admin API:\n"
-        f"POST /api/v1/admin/payment-submissions/{submission_id}/approve\n"
-        f"POST /api/v1/admin/payment-submissions/{submission_id}/reject"
+        f"Review in Admin Dashboard: {base_url}/admin"
     )
     url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
     try:
@@ -275,6 +505,11 @@ class CreateLicenseRequest(BaseModel):
     note: str | None = None
     plan: str = "trial"
     days: int | None = None
+
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 # ============================================================== PUBLIC ROUTES
@@ -470,10 +705,131 @@ async def submit_payment_screenshot(
     }
 
 
+# ========================================================== ADMIN AUTH & UI
+@app.post("/api/v1/admin/login")
+def admin_login(req: AdminLoginRequest, request: Request, response: Response):
+    ip = _client_ip(request)
+    _check_login_rate_limit(ip)
+
+    expected_user, expected_pass = _get_admin_credentials()
+    admin_tok = _get_admin_token()
+    if not expected_user or not expected_pass or not admin_tok:
+        raise HTTPException(status_code=503, detail="Admin login is not configured on the server.")
+
+    user_ok = hmac.compare_digest(req.username.encode("utf-8"), expected_user.encode("utf-8"))
+    pass_ok = hmac.compare_digest(req.password.encode("utf-8"), expected_pass.encode("utf-8"))
+    if not (user_ok and pass_ok):
+        _record_login_failure(ip)
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    _clear_login_failures(ip)
+    jti = secrets.token_urlsafe(24)
+    now = _utc_now()
+    ttl = max(60, int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", str(SESSION_TTL_SECONDS))))
+    expires_at = now + timedelta(seconds=ttl)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM admin_sessions WHERE expires_at < %s", (now - timedelta(days=1),))
+            cur.execute(
+                """
+                INSERT INTO admin_sessions (jti, username, created_at, expires_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (jti, expected_user, now, expires_at),
+            )
+
+    token = _sign_session_token(expected_user, jti, now, expires_at)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=_is_https_request(request),
+        max_age=ttl,
+        path="/",
+    )
+    return {
+        "ok": True,
+        "username": expected_user,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": ttl,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@app.post("/api/v1/admin/logout")
+def admin_logout(request: Request, response: Response):
+    token, _ = _extract_session_token(request)
+    if token:
+        payload = _decode_session_token(token, verify_exp=False)
+        if payload and payload.get("jti"):
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE admin_sessions SET revoked_at = %s WHERE jti = %s AND revoked_at IS NULL",
+                        (_utc_now(), payload["jti"]),
+                    )
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        samesite="lax",
+        httponly=True,
+        secure=_is_https_request(request),
+    )
+    return {"ok": True, "message": "Logged out."}
+
+
+@app.get("/api/v1/admin/session")
+def get_admin_session(session: dict = Depends(_require_admin_session)):
+    return {
+        "authenticated": True,
+        "username": session["username"],
+        "expires_at": session["expires_at"],
+        "plans": PLANS,
+    }
+
+
+@app.get("/admin/login", include_in_schema=False)
+def admin_login_page(request: Request):
+    token, _ = _extract_session_token(request)
+    if token and _get_admin_token() and _verify_active_session(token) is not None:
+        return RedirectResponse(url="/admin", status_code=302)
+    html = (ADMIN_UI_DIR / "login.html").read_text(encoding="utf-8")
+    return HTMLResponse(content=html, headers={"Content-Security-Policy": ADMIN_PAGE_CSP})
+
+
+@app.get("/admin", include_in_schema=False)
+@app.get("/admin/", include_in_schema=False)
+def admin_dashboard_page(request: Request):
+    token, source = _extract_session_token(request)
+    session = _verify_active_session(token) if token else None
+    if session is not None:
+        _check_admin(_get_admin_token())
+        html = (ADMIN_UI_DIR / "dashboard.html").read_text(encoding="utf-8")
+        return HTMLResponse(content=html, headers={"Content-Security-Policy": ADMIN_PAGE_CSP})
+
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept and "text/html" not in accept:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    target = "/admin/login?expired=1" if (source == "cookie" and token) else "/admin/login"
+    redirect = RedirectResponse(url=target, status_code=302)
+    if source == "cookie":
+        redirect.delete_cookie(
+            key=SESSION_COOKIE_NAME,
+            path="/",
+            samesite="lax",
+            httponly=True,
+            secure=_is_https_request(request),
+        )
+    return redirect
+
+
 # =============================================================== ADMIN ROUTES
 @app.post("/api/v1/admin/create")
-def create_license(req: CreateLicenseRequest, x_admin_token: str | None = Header(default=None)):
-    _check_admin(x_admin_token)
+def create_license(req: CreateLicenseRequest, _auth: dict = Depends(_require_admin_api)):
     plan_key = (req.plan or "trial").strip().lower()
     if plan_key != "trial" and plan_key not in PLANS:
         raise HTTPException(
@@ -517,17 +873,15 @@ def create_license(req: CreateLicenseRequest, x_admin_token: str | None = Header
 def renew_license(
     license_key: str = Query(...),
     plan: str = Query(...),
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
-    _check_admin(x_admin_token)
     with get_db() as conn:
         with conn.cursor() as cur:
             return _apply_renewal(cur, license_key.strip(), plan)
 
 
 @app.post("/api/v1/admin/revoke")
-def revoke_license(license_key: str, x_admin_token: str | None = Header(default=None)):
-    _check_admin(x_admin_token)
+def revoke_license(license_key: str, _auth: dict = Depends(_require_admin_api)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE licenses SET status = 'revoked' WHERE license_key = %s", (license_key,))
@@ -537,8 +891,7 @@ def revoke_license(license_key: str, x_admin_token: str | None = Header(default=
 
 
 @app.post("/api/v1/admin/reactivate")
-def reactivate_license(license_key: str, x_admin_token: str | None = Header(default=None)):
-    _check_admin(x_admin_token)
+def reactivate_license(license_key: str, _auth: dict = Depends(_require_admin_api)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE licenses SET status = 'active' WHERE license_key = %s", (license_key,))
@@ -550,30 +903,37 @@ def reactivate_license(license_key: str, x_admin_token: str | None = Header(defa
 @app.post("/api/v1/admin/expire")
 def force_expire_license(
     license_key: str = Query(...),
-    x_admin_token: str | None = Header(default=None),
+    days_from_now: float | None = Query(
+        default=None,
+        description="Optional offset in days from now (e.g. 3 for expiry-warning testing; omit or <=0 to force expired).",
+    ),
+    _auth: dict = Depends(_require_admin_api),
 ):
-    """Admin test helper: move a license's expires_at into the past so the expired renewal flow can be tested."""
-    _check_admin(x_admin_token)
-    expired_at = _utc_now() - timedelta(hours=1)
+    """Admin test helper: move a license's expires_at into the past (or N days from now) for testing."""
+    now = _utc_now()
+    if days_from_now is None:
+        target_exp = now - timedelta(hours=1)
+    else:
+        target_exp = now + timedelta(days=float(days_from_now))
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE licenses SET status = 'active', expires_at = %s WHERE license_key = %s",
-                (expired_at, license_key.strip()),
+                (target_exp, license_key.strip()),
             )
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Key not found")
+    derived_status = "expired" if target_exp <= now else "active"
     return {
         "ok": True,
         "license_key": license_key.strip(),
-        "status": "expired",
-        "expires_at": expired_at.isoformat(),
+        "status": derived_status,
+        "expires_at": target_exp.isoformat(),
     }
 
 
 @app.get("/api/v1/admin/list")
-def list_licenses(x_admin_token: str | None = Header(default=None)):
-    _check_admin(x_admin_token)
+def list_licenses(_auth: dict = Depends(_require_admin_api)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -590,10 +950,9 @@ def list_licenses(x_admin_token: str | None = Header(default=None)):
 @app.get("/api/v1/admin/payment-submissions")
 def list_payment_submissions(
     status: str = Query(default="pending"),
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
     """List payment screenshot submissions (defaults to 'pending'; pass status=all for full history)."""
-    _check_admin(x_admin_token)
     status_filter = (status or "pending").strip().lower()
     if status_filter not in {"pending", "approved", "rejected", "all"}:
         raise HTTPException(status_code=400, detail="Invalid status filter.")
@@ -648,10 +1007,9 @@ def list_payment_submissions(
 @app.get("/api/v1/admin/payment-submissions/{submission_id}/image")
 def view_payment_submission_image(
     submission_id: int,
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
     """Return the raw decoded screenshot image for direct viewing."""
-    _check_admin(x_admin_token)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -668,10 +1026,9 @@ def view_payment_submission_image(
 @app.post("/api/v1/admin/payment-submissions/{submission_id}/approve")
 def approve_payment_submission(
     submission_id: int,
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
     """Mark a pending submission approved and automatically apply the plan renewal atomically."""
-    _check_admin(x_admin_token)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -708,10 +1065,9 @@ def approve_payment_submission(
 @app.post("/api/v1/admin/payment-submissions/{submission_id}/reject")
 def reject_payment_submission(
     submission_id: int,
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
     """Mark a pending submission rejected without applying any license renewal."""
-    _check_admin(x_admin_token)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -735,3 +1091,212 @@ def reject_payment_submission(
         "submission_id": submission_id,
         "submission_status": "rejected",
     }
+
+
+def _plan_display_label(plan_key: str | None) -> str:
+    k = (plan_key or "trial").strip().lower()
+    if k == "trial":
+        return "Free Trial"
+    info = PLANS.get(k)
+    return info["label"] if info else k.title()
+
+
+def _compute_days_remaining(expires_at: datetime | None, now: datetime) -> int | None:
+    exp = _as_utc(expires_at)
+    if exp is None:
+        return None
+    remaining_sec = (exp - now).total_seconds()
+    if remaining_sec <= 0:
+        return 0
+    return int(math.ceil(remaining_sec / 86400.0))
+
+
+@app.get("/api/v1/admin/summary")
+def admin_dashboard_summary(
+    warning_days: int = Query(default=7, ge=1, le=60),
+    x_admin_token: str | None = Header(default=None),
+):
+    """
+    Lightweight overview payload for the Admin Dashboard Home tab.
+    Computes overall health state (`all_good` vs `needs_attention`), actionable
+    issues, active fleet list, counts, and current-month approved revenue without
+    transferring base64 payment screenshot blobs.
+    """
+    _check_admin(x_admin_token)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, status, plan, expires_at, has_paid_renewal,
+                       device_id, app_version, last_seen, note
+                FROM licenses
+                ORDER BY license_key ASC
+                """
+            )
+            license_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, license_key, claimed_plan, submitted_at, status
+                FROM payment_submissions
+                ORDER BY submitted_at DESC
+                """
+            )
+            submission_rows = cur.fetchall()
+
+    issues: list[dict] = []
+    active_licenses: list[dict] = []
+    enriched_all: list[dict] = []
+
+    counts = {
+        "total_licenses": len(license_rows),
+        "active_licenses": 0,
+        "expiring_soon_licenses": 0,
+        "expired_licenses": 0,
+        "revoked_licenses": 0,
+        "pending_payments": 0,
+        "approved_payments_this_month": 0,
+        "revenue_this_month_inr": 0,
+    }
+
+    for row in license_rows:
+        key = row["license_key"]
+        raw_status = (row.get("status") or "active").strip().lower()
+        plan = (row.get("plan") or "trial").strip().lower()
+        exp_dt = _as_utc(row.get("expires_at"))
+        days_rem = _compute_days_remaining(exp_dt, now)
+
+        if raw_status == "revoked":
+            eff = "revoked"
+            counts["revoked_licenses"] += 1
+            issues.append({
+                "type": "revoked",
+                "license_key": key,
+                "severity": "critical",
+                "title": f"{key} — Revoked",
+                "detail": f"License is manually revoked ({_plan_display_label(plan)}).",
+                "target_tab": "licenses",
+                "action_label": "Manage in Licenses",
+            })
+        elif exp_dt is not None and exp_dt <= now:
+            eff = "expired"
+            counts["expired_licenses"] += 1
+            issues.append({
+                "type": "expired",
+                "license_key": key,
+                "severity": "critical",
+                "title": f"{key} — Expired",
+                "detail": f"{_plan_display_label(plan)} expired on {exp_dt.strftime('%Y-%m-%d')}.",
+                "target_tab": "licenses",
+                "action_label": "Renew in Licenses",
+            })
+        elif days_rem is not None and days_rem <= warning_days:
+            eff = "expiring_soon"
+            counts["expiring_soon_licenses"] += 1
+            unit = "day" if days_rem == 1 else "days"
+            issues.append({
+                "type": "expiring_soon",
+                "license_key": key,
+                "severity": "warning",
+                "title": f"{key} — Expiring in {days_rem} {unit}",
+                "detail": f"{_plan_display_label(plan)} ends on {exp_dt.strftime('%Y-%m-%d')}.",
+                "target_tab": "licenses",
+                "action_label": "View in Licenses",
+            })
+        else:
+            eff = "active"
+            counts["active_licenses"] += 1
+
+        item = {
+            "license_key": key,
+            "status": raw_status,
+            "effective_status": eff,
+            "plan": plan,
+            "plan_label": _plan_display_label(plan),
+            "expires_at": _iso_utc(exp_dt),
+            "expires_date": exp_dt.strftime("%Y-%m-%d") if exp_dt else None,
+            "days_remaining": days_rem,
+            "device_id": row.get("device_id"),
+            "app_version": row.get("app_version"),
+            "last_seen": _iso_utc(row.get("last_seen")),
+            "note": row.get("note"),
+        }
+        enriched_all.append(item)
+        if eff == "active":
+            active_licenses.append(item)
+
+    for sub in submission_rows:
+        st = (sub.get("status") or "").strip().lower()
+        if st == "pending":
+            counts["pending_payments"] += 1
+        elif st == "approved":
+            sub_dt = _as_utc(sub.get("submitted_at"))
+            if sub_dt is not None and sub_dt.year == now.year and sub_dt.month == now.month:
+                counts["approved_payments_this_month"] += 1
+                plan_meta = PLANS.get((sub.get("claimed_plan") or "").strip().lower(), {})
+                counts["revenue_this_month_inr"] += int(plan_meta.get("price_inr") or 0)
+
+    if counts["pending_payments"] > 0:
+        n_pend = counts["pending_payments"]
+        noun = "payment submission" if n_pend == 1 else "payment submissions"
+        issues.insert(0, {
+            "type": "pending_payments",
+            "license_key": None,
+            "severity": "action",
+            "title": f"{n_pend} pending {noun}",
+            "detail": "Manual UPI screenshot verification awaiting review.",
+            "target_tab": "payments",
+            "action_label": "Review Pending Payments",
+        })
+
+    if counts["total_licenses"] == 0:
+        issues.append({
+            "type": "no_licenses",
+            "license_key": None,
+            "severity": "info",
+            "title": "No licenses provisioned yet",
+            "detail": "Create a license key in the Licenses tab to get started.",
+            "target_tab": "licenses",
+            "action_label": "Open Licenses",
+        })
+
+    primary_license = None
+    if len(enriched_all) == 1:
+        primary_license = enriched_all[0]
+    elif active_licenses:
+        primary_license = next(
+            (x for x in active_licenses if x["license_key"] == "VIVEK-ANPR-0001"),
+            active_licenses[0],
+        )
+    elif enriched_all:
+        primary_license = enriched_all[0]
+
+    overall_state = "all_good" if (counts["total_licenses"] > 0 and len(issues) == 0) else "needs_attention"
+
+    return {
+        "overall_state": overall_state,
+        "primary_license": primary_license,
+        "issues": issues,
+        "active_licenses": active_licenses,
+        "counts": counts,
+        "warning_days": warning_days,
+        "generated_at": now.isoformat(),
+    }
+
+
+_DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "admin_dashboard.html"
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    return RedirectResponse(url="/admin")
+
+
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+def serve_admin_dashboard():
+    """Serve the lightweight mobile-friendly Admin Dashboard (Home, Licenses, Pending Payments)."""
+    if not _DASHBOARD_HTML_PATH.is_file():
+        raise HTTPException(status_code=500, detail="Admin dashboard HTML asset is missing.")
+    return HTMLResponse(content=_DASHBOARD_HTML_PATH.read_text(encoding="utf-8"))
