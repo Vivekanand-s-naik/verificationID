@@ -1118,7 +1118,7 @@ def admin_dashboard_summary(
     _auth: dict = Depends(_require_admin_api),
 ):
     """
-    Lightweight overview payload for the Admin Dashboard Overview tab.
+    Lightweight overview payload for the Admin Dashboard Home tab.
     Computes overall health state (`all_good` vs `needs_attention`), actionable
     issues, active fleet list, counts, and current-month approved revenue without
     transferring base64 payment screenshot blobs.

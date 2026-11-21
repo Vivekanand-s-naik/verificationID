@@ -729,14 +729,16 @@ def test_admin_summary_states_revenue_and_dashboard_html(env_client):
     )
     assert login_r.status_code == 200
 
-    # 1. Admin dashboard HTML defaults to Pending Payments and includes Overview summary support
+    # 1. Admin dashboard HTML defaults to Home tab first and queries /api/v1/admin/summary
     page = client.get("/admin", follow_redirects=False)
     assert page.status_code == 200
-    assert 'data-tab="pending"' in page.text
-    assert 'id="panel-pending" class="panel active"' in page.text
     assert 'data-tab="home"' in page.text
+    assert 'id="panel-home" class="panel active"' in page.text
+    assert page.text.index('data-tab="home"') < page.text.index('data-tab="pending"')
     assert "/api/v1/admin/summary" in page.text
-    assert "ALL SYSTEMS ACTIVE" in page.text
+    assert "All Systems Active" in page.text
+    assert "home-good-shell" in page.text
+    assert "home-plain-shell" in page.text
 
     # 2. Single healthy active license + 0 pending submissions -> all_good (works via session cookie & token)
     s1_cookie = client.get("/api/v1/admin/summary")
