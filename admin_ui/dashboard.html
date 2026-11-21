@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -23,7 +24,11 @@
       --neutral-bg: #e5e7eb;
       --radius: 10px;
     }
-    * { box-sizing: border-box; }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       margin: 0;
       background: var(--bg);
@@ -31,6 +36,7 @@
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       line-height: 1.45;
     }
+
     .topbar {
       position: sticky;
       top: 0;
@@ -39,6 +45,7 @@
       border-bottom: 1px solid var(--border);
       padding: 12px 16px;
     }
+
     .topbar-inner {
       max-width: 1180px;
       margin: 0 auto;
@@ -48,28 +55,36 @@
       justify-content: space-between;
       gap: 10px;
     }
+
     .brand {
       min-width: 0;
       max-width: 100%;
     }
+
     .brand h1 {
       margin: 0;
       font-size: 1.15rem;
       font-weight: 700;
     }
+
     .session-meta {
       font-size: 0.82rem;
       color: var(--muted);
       overflow-wrap: anywhere;
     }
+
     .topbar-actions {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    button, select, input {
+
+    button,
+    select,
+    input {
       font-family: inherit;
     }
+
     .btn {
       min-height: 44px;
       padding: 8px 14px;
@@ -85,47 +100,58 @@
       justify-content: center;
       gap: 6px;
     }
+
     .btn:hover:not(:disabled) {
       background: var(--surface-alt);
     }
+
     .btn:disabled {
       opacity: 0.6;
       cursor: not-allowed;
     }
+
     .btn-primary {
       background: var(--primary);
       border-color: var(--primary);
       color: #fff;
     }
+
     .btn-primary:hover:not(:disabled) {
       background: var(--primary-hover);
     }
+
     .btn-success {
       background: var(--success);
       border-color: var(--success);
       color: #fff;
     }
+
     .btn-success:hover:not(:disabled) {
       background: #166534;
     }
+
     .btn-danger {
       background: var(--danger);
       border-color: var(--danger);
       color: #fff;
     }
+
     .btn-danger:hover:not(:disabled) {
       background: #991b1b;
     }
+
     .btn-sm {
       min-height: 38px;
       padding: 6px 10px;
       font-size: 0.85rem;
     }
+
     .container {
       max-width: 1180px;
       margin: 0 auto;
       padding: 16px;
     }
+
     .tabs {
       display: flex;
       gap: 8px;
@@ -133,6 +159,7 @@
       padding-bottom: 4px;
       margin-bottom: 16px;
     }
+
     .tab-btn {
       min-height: 44px;
       padding: 8px 14px;
@@ -148,11 +175,13 @@
       align-items: center;
       gap: 8px;
     }
+
     .tab-btn.active {
       background: var(--primary);
       border-color: var(--primary);
       color: #ffffff;
     }
+
     .count-pill {
       padding: 2px 8px;
       border-radius: 999px;
@@ -161,15 +190,19 @@
       background: rgba(17, 24, 39, 0.1);
       color: inherit;
     }
+
     .tab-btn.active .count-pill {
       background: rgba(255, 255, 255, 0.22);
     }
+
     .panel {
       display: none;
     }
+
     .panel.active {
       display: block;
     }
+
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -177,11 +210,13 @@
       padding: 16px;
       margin-bottom: 16px;
     }
+
     .card-title {
       margin: 0 0 12px;
       font-size: 1.02rem;
       font-weight: 700;
     }
+
     .toast {
       position: fixed;
       right: 16px;
@@ -199,15 +234,21 @@
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
       display: none;
     }
-    .toast.visible { display: block; }
+
+    .toast.visible {
+      display: block;
+    }
+
     .toast.error {
       background: #991b1b;
       border-color: #7f1d1d;
     }
+
     .toast.success {
       background: #166534;
       border-color: #14532d;
     }
+
     .badge {
       display: inline-block;
       padding: 3px 9px;
@@ -217,22 +258,29 @@
       text-transform: uppercase;
       letter-spacing: 0.02em;
     }
-    .badge-active, .badge-approved {
+
+    .badge-active,
+    .badge-approved {
       background: var(--success-bg);
       color: var(--success);
     }
-    .badge-revoked, .badge-rejected {
+
+    .badge-revoked,
+    .badge-rejected {
       background: var(--danger-bg);
       color: var(--danger);
     }
+
     .badge-expired {
       background: var(--warn-bg);
       color: var(--warn);
     }
+
     .badge-pending {
       background: #dbeafe;
       color: #1e40af;
     }
+
     .empty-state {
       background: var(--surface);
       border: 1px dashed var(--border);
@@ -241,16 +289,19 @@
       text-align: center;
       color: var(--muted);
     }
+
     .grid-cards {
       display: grid;
       grid-template-columns: 1fr;
       gap: 14px;
     }
+
     @media (min-width: 820px) {
       .grid-cards {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
     }
+
     .sub-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -260,31 +311,37 @@
       flex-direction: column;
       gap: 12px;
     }
+
     .sub-head {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
       gap: 8px;
     }
+
     .sub-id {
       font-size: 0.85rem;
       color: var(--muted);
       font-weight: 600;
     }
+
     .mono {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       word-break: break-all;
     }
+
     .kv-list {
       display: grid;
       grid-template-columns: auto 1fr;
       gap: 6px 12px;
       font-size: 0.9rem;
     }
+
     .kv-label {
       color: var(--muted);
       font-weight: 600;
     }
+
     .thumb-wrap {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -292,6 +349,7 @@
       padding: 6px;
       text-align: center;
     }
+
     .thumb-img {
       max-width: 100%;
       max-height: 260px;
@@ -301,28 +359,33 @@
       display: block;
       margin: 0 auto;
     }
+
     .thumb-hint {
       margin-top: 6px;
       font-size: 0.78rem;
       color: var(--muted);
     }
+
     .sub-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 10px;
       margin-top: auto;
     }
+
     .form-grid {
       display: grid;
       grid-template-columns: 1fr;
       gap: 10px;
     }
+
     @media (min-width: 720px) {
       .form-grid {
         grid-template-columns: 1.3fr 1.5fr auto;
         align-items: end;
       }
     }
+
     .field label {
       display: block;
       margin-bottom: 5px;
@@ -330,6 +393,7 @@
       font-weight: 600;
       color: var(--muted);
     }
+
     .field input,
     .search-input,
     .plan-select {
@@ -342,6 +406,7 @@
       background: #fff;
       color: var(--text);
     }
+
     .toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -350,15 +415,18 @@
       gap: 10px;
       margin-bottom: 12px;
     }
+
     .search-input {
       max-width: 340px;
     }
+
     .filter-pills {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       margin-bottom: 12px;
     }
+
     .pill-btn {
       min-height: 38px;
       padding: 6px 12px;
@@ -370,22 +438,26 @@
       font-weight: 600;
       cursor: pointer;
     }
+
     .pill-btn.active {
       background: #111827;
       border-color: #111827;
       color: #ffffff;
     }
+
     .table-wrap {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       overflow: hidden;
     }
+
     table.lic-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 0.9rem;
     }
+
     table.lic-table th,
     table.lic-table td {
       padding: 10px 12px;
@@ -393,6 +465,7 @@
       text-align: left;
       vertical-align: top;
     }
+
     table.lic-table th {
       background: var(--surface-alt);
       font-size: 0.8rem;
@@ -400,21 +473,25 @@
       letter-spacing: 0.03em;
       color: var(--muted);
     }
+
     table.lic-table tr:last-child td {
       border-bottom: none;
     }
+
     .row-actions {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       align-items: center;
     }
+
     .renew-group {
       display: flex;
       gap: 6px;
       align-items: center;
       flex-wrap: wrap;
     }
+
     .plan-select {
       width: auto;
       min-width: 165px;
@@ -422,14 +499,17 @@
       font-size: 0.88rem;
       padding: 4px 8px;
     }
+
     @media (max-width: 859px) {
       .table-wrap {
         background: transparent;
         border: none;
       }
+
       table.lic-table thead {
         display: none;
       }
+
       table.lic-table,
       table.lic-table tbody,
       table.lic-table tr,
@@ -437,6 +517,7 @@
         display: block;
         width: 100%;
       }
+
       table.lic-table tr {
         background: var(--surface);
         border: 1px solid var(--border);
@@ -444,6 +525,7 @@
         padding: 12px;
         margin-bottom: 12px;
       }
+
       table.lic-table td {
         display: flex;
         justify-content: space-between;
@@ -451,29 +533,35 @@
         padding: 6px 0;
         border-bottom: 1px solid #f3f4f6;
       }
+
       table.lic-table td::before {
         content: attr(data-label);
         font-weight: 600;
         color: var(--muted);
         flex-shrink: 0;
       }
+
       table.lic-table td:last-child {
         display: block;
         border-bottom: none;
         padding-top: 10px;
       }
+
       table.lic-table td:last-child::before {
         display: block;
         margin-bottom: 8px;
       }
+
       .plan-select {
         flex: 1 1 160px;
         min-height: 42px;
       }
+
       .btn-sm {
         min-height: 42px;
       }
     }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -484,9 +572,11 @@
       justify-content: center;
       padding: 16px;
     }
+
     .modal-backdrop.open {
       display: flex;
     }
+
     .modal-content {
       max-width: 96vw;
       max-height: 92vh;
@@ -497,12 +587,14 @@
       flex-direction: column;
       gap: 10px;
     }
+
     .modal-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
     }
+
     .modal-img {
       max-width: 90vw;
       max-height: 75vh;
@@ -510,29 +602,63 @@
       border-radius: 6px;
       background: #111827;
     }
+
     /* =====================================================================
        HOME TAB — STATE A: ALL SYSTEMS ACTIVE (RICH, ANIMATED SAAS SHOWCASE)
        ===================================================================== */
     @keyframes homePulseRing {
-      0% { transform: scale(1); opacity: 0.72; }
-      72% { transform: scale(2.45); opacity: 0; }
-      100% { transform: scale(2.45); opacity: 0; }
+      0% {
+        transform: scale(1);
+        opacity: 0.72;
+      }
+
+      72% {
+        transform: scale(2.45);
+        opacity: 0;
+      }
+
+      100% {
+        transform: scale(2.45);
+        opacity: 0;
+      }
     }
+
     @keyframes homeGlowBreath {
-      0%, 100% {
+
+      0%,
+      100% {
         box-shadow: 0 18px 42px rgba(6, 78, 59, 0.28), 0 0 0 1px rgba(52, 211, 153, 0.36), inset 0 1px 0 rgba(167, 243, 208, 0.22);
       }
+
       50% {
         box-shadow: 0 22px 54px rgba(16, 185, 129, 0.38), 0 0 0 1px rgba(110, 231, 183, 0.54), inset 0 1px 0 rgba(209, 250, 229, 0.34);
       }
     }
+
     @keyframes homeFadeUp {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
+
     @keyframes homeAmbientShift {
-      0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.5; }
-      50% { transform: translate3d(18px, -10px, 0) scale(1.06); opacity: 0.75; }
+
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(1);
+        opacity: 0.5;
+      }
+
+      50% {
+        transform: translate3d(18px, -10px, 0) scale(1.06);
+        opacity: 0.75;
+      }
     }
 
     .home-good-shell {
@@ -546,6 +672,7 @@
         linear-gradient(135deg, #064e3b 0%, #092b2d 48%, #0f172a 100%);
       animation: homeGlowBreath 4.2s ease-in-out infinite, homeFadeUp 0.38s ease-out;
     }
+
     .home-good-shell::before {
       content: "";
       position: absolute;
@@ -558,10 +685,12 @@
       pointer-events: none;
       animation: homeAmbientShift 7s ease-in-out infinite;
     }
-    .home-good-shell > * {
+
+    .home-good-shell>* {
       position: relative;
       z-index: 1;
     }
+
     .good-top-row {
       display: flex;
       flex-wrap: wrap;
@@ -570,6 +699,7 @@
       gap: 12px;
       margin-bottom: 22px;
     }
+
     .good-status-badge {
       display: inline-flex;
       align-items: center;
@@ -585,6 +715,7 @@
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
+
     .good-beacon {
       position: relative;
       width: 11px;
@@ -594,6 +725,7 @@
       box-shadow: 0 0 12px #34d399, 0 0 22px rgba(52, 211, 153, 0.75);
       flex-shrink: 0;
     }
+
     .good-beacon::after {
       content: "";
       position: absolute;
@@ -602,11 +734,13 @@
       background: #6ee7b7;
       animation: homePulseRing 2.1s cubic-bezier(0.22, 1, 0.36, 1) infinite;
     }
+
     .good-updated {
       font-size: 0.8rem;
       color: rgba(167, 243, 208, 0.78);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+
     .good-hero-grid {
       display: flex;
       flex-wrap: wrap;
@@ -615,6 +749,7 @@
       gap: 20px;
       margin-bottom: 24px;
     }
+
     .good-hero-copy {
       flex: 1 1 260px;
       min-width: 0;
@@ -622,6 +757,7 @@
       flex-direction: column;
       justify-content: center;
     }
+
     .good-eyebrow {
       font-size: 0.78rem;
       font-weight: 700;
@@ -630,6 +766,7 @@
       color: #6ee7b7;
       margin-bottom: 6px;
     }
+
     .good-plan-title {
       margin: 0 0 8px;
       font-size: clamp(1.7rem, 4vw, 2.35rem);
@@ -638,6 +775,7 @@
       color: #ffffff;
       line-height: 1.15;
     }
+
     .good-submeta {
       display: flex;
       flex-wrap: wrap;
@@ -646,10 +784,12 @@
       color: #d1fae5;
       overflow-wrap: anywhere;
     }
+
     .good-submeta .mono {
       color: #a7f3d0;
       font-weight: 600;
     }
+
     .good-days-card {
       flex: 0 0 auto;
       min-width: 205px;
@@ -663,10 +803,12 @@
       text-align: right;
       transition: transform 0.22s ease, border-color 0.22s ease;
     }
+
     .good-days-card:hover {
       transform: translateY(-2px);
       border-color: rgba(167, 243, 208, 0.72);
     }
+
     .good-days-num {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 2.75rem;
@@ -675,6 +817,7 @@
       color: #6ee7b7;
       text-shadow: 0 0 22px rgba(52, 211, 153, 0.45);
     }
+
     .good-days-label {
       margin-top: 6px;
       font-size: 0.78rem;
@@ -683,17 +826,20 @@
       letter-spacing: 0.08em;
       color: #d1fae5;
     }
+
     .good-days-date {
       margin-top: 4px;
       font-size: 0.8rem;
       color: rgba(167, 243, 208, 0.84);
     }
+
     .good-metrics {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 14px;
       animation: homeFadeUp 0.5s ease-out;
     }
+
     .good-metric-card {
       padding: 16px 18px;
       border-radius: 12px;
@@ -701,11 +847,13 @@
       border: 1px solid rgba(110, 231, 183, 0.24);
       transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
     }
+
     .good-metric-card:hover {
       transform: translateY(-2px);
       border-color: rgba(110, 231, 183, 0.52);
       background: rgba(15, 23, 42, 0.68);
     }
+
     .good-metric-k {
       font-size: 0.74rem;
       font-weight: 700;
@@ -714,6 +862,7 @@
       color: #94a3b8;
       margin-bottom: 6px;
     }
+
     .good-metric-v {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 1.7rem;
@@ -721,11 +870,13 @@
       color: #ffffff;
       line-height: 1.15;
     }
+
     .good-metric-sub {
       margin-top: 4px;
       font-size: 0.8rem;
       color: #6ee7b7;
     }
+
     .good-fleet-card {
       margin-top: 16px;
       padding: 16px 18px;
@@ -733,6 +884,7 @@
       background: rgba(15, 23, 42, 0.44);
       border: 1px solid rgba(148, 163, 184, 0.2);
     }
+
     .good-fleet-title {
       margin: 0 0 10px;
       font-size: 0.76rem;
@@ -741,6 +893,7 @@
       letter-spacing: 0.08em;
       color: #94a3b8;
     }
+
     .good-fleet-row {
       display: flex;
       flex-wrap: wrap;
@@ -751,15 +904,19 @@
       font-size: 0.88rem;
       color: #e2e8f0;
     }
+
     .good-fleet-row:first-of-type {
       border-top: none;
       padding-top: 0;
     }
+
     .good-fleet-days {
       color: #6ee7b7;
       font-weight: 600;
     }
+
     @media (prefers-reduced-motion: reduce) {
+
       .home-good-shell,
       .home-good-shell::before,
       .good-beacon::after,
@@ -779,34 +936,40 @@
       flex-direction: column;
       gap: 12px;
     }
+
     .plain-banner {
       background: #ffffff;
       border: 1px solid #d1d5db;
       border-radius: 4px;
       padding: 14px 16px;
     }
+
     .plain-banner h2 {
       margin: 0 0 4px;
       font-size: 1.05rem;
       font-weight: 700;
       color: #111827;
     }
+
     .plain-banner p {
       margin: 0;
       font-size: 0.9rem;
       color: #4b5563;
     }
+
     .plain-metrics {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
     }
+
     .plain-metric {
       background: #ffffff;
       border: 1px solid #d1d5db;
       border-radius: 4px;
       padding: 12px 14px;
     }
+
     .plain-metric-k {
       font-size: 0.74rem;
       font-weight: 600;
@@ -814,6 +977,7 @@
       letter-spacing: 0.04em;
       color: #6b7280;
     }
+
     .plain-metric-v {
       margin-top: 4px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -821,16 +985,19 @@
       font-weight: 700;
       color: #111827;
     }
+
     .plain-metric-sub {
       margin-top: 2px;
       font-size: 0.78rem;
       color: #6b7280;
     }
+
     .plain-section {
       background: #ffffff;
       border: 1px solid #d1d5db;
       border-radius: 4px;
     }
+
     .plain-section-head {
       padding: 10px 14px;
       border-bottom: 1px solid #e5e7eb;
@@ -841,6 +1008,7 @@
       letter-spacing: 0.04em;
       color: #374151;
     }
+
     .plain-issue-row {
       display: flex;
       flex-wrap: wrap;
@@ -850,18 +1018,22 @@
       padding: 12px 14px;
       border-bottom: 1px solid #e5e7eb;
     }
+
     .plain-issue-row:last-child {
       border-bottom: none;
     }
+
     .plain-issue-main {
       flex: 1 1 200px;
       min-width: 0;
     }
+
     .plain-issue-title {
       font-size: 0.94rem;
       font-weight: 600;
       color: #111827;
     }
+
     .plain-issue-tag {
       display: inline-block;
       margin-right: 8px;
@@ -875,11 +1047,13 @@
       font-weight: 700;
       vertical-align: middle;
     }
+
     .plain-issue-detail {
       margin-top: 3px;
       font-size: 0.85rem;
       color: #4b5563;
     }
+
     .plain-jump-btn {
       min-height: 38px;
       padding: 6px 12px;
@@ -892,9 +1066,11 @@
       cursor: pointer;
       white-space: nowrap;
     }
+
     .plain-jump-btn:hover {
       background: #f3f4f6;
     }
+
     .plain-active-row {
       display: flex;
       flex-wrap: wrap;
@@ -905,29 +1081,35 @@
       font-size: 0.86rem;
       color: #374151;
     }
+
     .plain-active-row:last-child {
       border-bottom: none;
     }
+
     @media (max-width: 680px) {
       .home-good-shell {
         padding: 20px 16px;
         border-radius: 14px;
       }
+
       .good-days-card {
         width: 100%;
         min-width: 0;
         text-align: left;
       }
+
       .good-metrics,
       .plain-metrics {
         grid-template-columns: 1fr;
       }
+
       .plain-jump-btn {
         width: 100%;
       }
     }
   </style>
 </head>
+
 <body>
   <header class="topbar">
     <div class="topbar-inner">
@@ -959,7 +1141,9 @@
     </nav>
 
     <section id="panel-home" class="panel active" role="tabpanel">
-      <div id="home-summary"><div class="empty-state">Loading overview...</div></div>
+      <div id="home-summary">
+        <div class="empty-state">Loading overview...</div>
+      </div>
     </section>
 
     <section id="panel-pending" class="panel" role="tabpanel">
@@ -983,7 +1167,8 @@
       </div>
 
       <div class="toolbar">
-        <input id="license-search" class="search-input" type="search" placeholder="Filter by key, device ID, or note..." aria-label="Filter licenses" />
+        <input id="license-search" class="search-input" type="search" placeholder="Filter by key, device ID, or note..."
+          aria-label="Filter licenses" />
       </div>
       <div id="licenses-container"></div>
     </section>
@@ -1174,28 +1359,28 @@
             " (" + escapeHtml(sub.claimed_plan) + ", " + priceTxt + ")";
           return (
             '<article class="sub-card" data-sub-id="' + escapeHtml(sub.id) + '">' +
-              '<div class="sub-head">' +
-                '<div>' +
-                  '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
-                  '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
-                '</div>' +
-                '<span class="badge badge-pending">Pending</span>' +
-              '</div>' +
-              '<div class="kv-list">' +
-                '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
-                '<span class="kv-label">Plan</span><span>' + planTxt + '</span>' +
-                '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
-              '</div>' +
-              (imgUri
-                ? '<div class="thumb-wrap">' +
-                    '<img class="thumb-img" src="' + imgUri + '" alt="Payment screenshot #' + escapeHtml(sub.id) + '" data-action="zoom" />' +
-                    '<div class="thumb-hint">Tap screenshot to enlarge</div>' +
-                  '</div>'
-                : '<div class="empty-state">Screenshot unavailable</div>') +
-              '<div class="sub-actions">' +
-                '<button type="button" class="btn btn-success" data-action="approve">Approve</button>' +
-                '<button type="button" class="btn btn-danger" data-action="reject">Reject</button>' +
-              '</div>' +
+            '<div class="sub-head">' +
+            '<div>' +
+            '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
+            '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
+            '</div>' +
+            '<span class="badge badge-pending">Pending</span>' +
+            '</div>' +
+            '<div class="kv-list">' +
+            '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
+            '<span class="kv-label">Plan</span><span>' + planTxt + '</span>' +
+            '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
+            '</div>' +
+            (imgUri
+              ? '<div class="thumb-wrap">' +
+              '<img class="thumb-img" src="' + imgUri + '" alt="Payment screenshot #' + escapeHtml(sub.id) + '" data-action="zoom" />' +
+              '<div class="thumb-hint">Tap screenshot to enlarge</div>' +
+              '</div>'
+              : '<div class="empty-state">Screenshot unavailable</div>') +
+            '<div class="sub-actions">' +
+            '<button type="button" class="btn btn-success" data-action="approve">Approve</button>' +
+            '<button type="button" class="btn btn-danger" data-action="reject">Reject</button>' +
+            '</div>' +
             '</article>'
           );
         }).join("");
@@ -1241,46 +1426,46 @@
           const isRevoked = (lic.status || "").toLowerCase() === "revoked";
           return (
             '<tr data-license-key="' + escapeHtml(lic.license_key) + '">' +
-              '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
-              '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(eff) + '</span></td>' +
-              '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
-              '<td data-label="Expires At">' + escapeHtml(formatDate(lic.expires_at)) + '</td>' +
-              '<td data-label="Device ID"><span class="mono">' + escapeHtml(lic.device_id || "—") + '</span></td>' +
-              '<td data-label="Last Seen">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
-              '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
-              '<td data-label="Actions">' +
-                '<div class="row-actions">' +
-                  (isRevoked
-                    ? '<button type="button" class="btn btn-success btn-sm" data-lic-action="reactivate">Reactivate</button>'
-                    : '<button type="button" class="btn btn-danger btn-sm" data-lic-action="revoke">Revoke</button>' +
-                      '<button type="button" class="btn btn-sm" data-lic-action="reactivate">Reactivate</button>') +
-                  '<div class="renew-group">' +
-                    '<select class="plan-select" aria-label="Renewal plan for ' + escapeHtml(lic.license_key) + '">' +
-                      renderPlanOptions(defaultPlan) +
-                    '</select>' +
-                    '<button type="button" class="btn btn-primary btn-sm" data-lic-action="renew">Renew</button>' +
-                  '</div>' +
-                '</div>' +
-              '</td>' +
+            '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
+            '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(eff) + '</span></td>' +
+            '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
+            '<td data-label="Expires At">' + escapeHtml(formatDate(lic.expires_at)) + '</td>' +
+            '<td data-label="Device ID"><span class="mono">' + escapeHtml(lic.device_id || "—") + '</span></td>' +
+            '<td data-label="Last Seen">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
+            '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
+            '<td data-label="Actions">' +
+            '<div class="row-actions">' +
+            (isRevoked
+              ? '<button type="button" class="btn btn-success btn-sm" data-lic-action="reactivate">Reactivate</button>'
+              : '<button type="button" class="btn btn-danger btn-sm" data-lic-action="revoke">Revoke</button>' +
+              '<button type="button" class="btn btn-sm" data-lic-action="reactivate">Reactivate</button>') +
+            '<div class="renew-group">' +
+            '<select class="plan-select" aria-label="Renewal plan for ' + escapeHtml(lic.license_key) + '">' +
+            renderPlanOptions(defaultPlan) +
+            '</select>' +
+            '<button type="button" class="btn btn-primary btn-sm" data-lic-action="renew">Renew</button>' +
+            '</div>' +
+            '</div>' +
+            '</td>' +
             '</tr>'
           );
         }).join("");
 
         root.innerHTML =
           '<div class="table-wrap">' +
-            '<table class="lic-table">' +
-              '<thead><tr>' +
-                '<th>License Key</th>' +
-                '<th>Status</th>' +
-                '<th>Plan</th>' +
-                '<th>Expires At</th>' +
-                '<th>Device ID</th>' +
-                '<th>Last Seen</th>' +
-                '<th>Note</th>' +
-                '<th>Actions</th>' +
-              '</tr></thead>' +
-              '<tbody>' + rowsHtml + '</tbody>' +
-            '</table>' +
+          '<table class="lic-table">' +
+          '<thead><tr>' +
+          '<th>License Key</th>' +
+          '<th>Status</th>' +
+          '<th>Plan</th>' +
+          '<th>Expires At</th>' +
+          '<th>Device ID</th>' +
+          '<th>Last Seen</th>' +
+          '<th>Note</th>' +
+          '<th>Actions</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+          '</table>' +
           '</div>';
       }
 
@@ -1304,23 +1489,23 @@
           const priceTxt = sub.price_inr !== null && sub.price_inr !== undefined ? "₹" + escapeHtml(sub.price_inr) : "—";
           return (
             '<article class="sub-card" data-history-id="' + escapeHtml(sub.id) + '">' +
-              '<div class="sub-head">' +
-                '<div>' +
-                  '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
-                  '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
-                '</div>' +
-                '<span class="badge ' + badgeCls + '">' + escapeHtml(st) + '</span>' +
-              '</div>' +
-              '<div class="kv-list">' +
-                '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
-                '<span class="kv-label">Plan</span><span>' + escapeHtml(sub.plan_label || sub.claimed_plan) + ' (' + priceTxt + ')</span>' +
-                '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
-              '</div>' +
-              (imgUri
-                ? '<div class="thumb-wrap">' +
-                    '<img class="thumb-img" src="' + imgUri + '" alt="Reviewed screenshot #' + escapeHtml(sub.id) + '" data-history-zoom="1" />' +
-                  '</div>'
-                : '') +
+            '<div class="sub-head">' +
+            '<div>' +
+            '<div class="sub-id">Submission #' + escapeHtml(sub.id) + '</div>' +
+            '<strong class="mono">' + escapeHtml(sub.license_key) + '</strong>' +
+            '</div>' +
+            '<span class="badge ' + badgeCls + '">' + escapeHtml(st) + '</span>' +
+            '</div>' +
+            '<div class="kv-list">' +
+            '<span class="kv-label">Device ID</span><span class="mono">' + escapeHtml(sub.device_id || "—") + '</span>' +
+            '<span class="kv-label">Plan</span><span>' + escapeHtml(sub.plan_label || sub.claimed_plan) + ' (' + priceTxt + ')</span>' +
+            '<span class="kv-label">Submitted</span><span>' + escapeHtml(formatDate(sub.submitted_at)) + '</span>' +
+            '</div>' +
+            (imgUri
+              ? '<div class="thumb-wrap">' +
+              '<img class="thumb-img" src="' + imgUri + '" alt="Reviewed screenshot #' + escapeHtml(sub.id) + '" data-history-zoom="1" />' +
+              '</div>'
+              : '') +
             '</article>'
           );
         }).join("");
@@ -1396,66 +1581,66 @@
           const expDate = p && p.expires_date ? p.expires_date : "No expiry";
           const fleetExtra = activeList.length > 1
             ? (
-                '<div class="good-fleet-card">' +
-                  '<h3 class="good-fleet-title">Active Fleet (' + escapeHtml(activeList.length) + ')</h3>' +
-                  activeList.map(function (lic) {
-                    const dTxt = lic.days_remaining !== null && lic.days_remaining !== undefined
-                      ? lic.days_remaining + "d remaining"
-                      : "Active";
-                    return (
-                      '<div class="good-fleet-row">' +
-                        '<span><strong class="mono">' + escapeHtml(lic.license_key) + '</strong> &middot; ' + escapeHtml(lic.plan_label || lic.plan) + '</span>' +
-                        '<span class="good-fleet-days">' + escapeHtml(dTxt) + (lic.expires_date ? ' (until ' + escapeHtml(lic.expires_date) + ')' : '') + '</span>' +
-                      '</div>'
-                    );
-                  }).join("") +
-                '</div>'
-              )
+              '<div class="good-fleet-card">' +
+              '<h3 class="good-fleet-title">Active Fleet (' + escapeHtml(activeList.length) + ')</h3>' +
+              activeList.map(function (lic) {
+                const dTxt = lic.days_remaining !== null && lic.days_remaining !== undefined
+                  ? lic.days_remaining + "d remaining"
+                  : "Active";
+                return (
+                  '<div class="good-fleet-row">' +
+                  '<span><strong class="mono">' + escapeHtml(lic.license_key) + '</strong> &middot; ' + escapeHtml(lic.plan_label || lic.plan) + '</span>' +
+                  '<span class="good-fleet-days">' + escapeHtml(dTxt) + (lic.expires_date ? ' (until ' + escapeHtml(lic.expires_date) + ')' : '') + '</span>' +
+                  '</div>'
+                );
+              }).join("") +
+              '</div>'
+            )
             : "";
 
           root.innerHTML =
             '<div class="home-good-shell" data-home-state="all_good">' +
-              '<div class="good-top-row">' +
-                '<div class="good-status-badge">' +
-                  '<span class="good-beacon" aria-hidden="true"></span>' +
-                  '<span>All Systems Active</span>' +
-                '</div>' +
-                '<div class="good-updated">Checked ' + escapeHtml(formatDate(s.generated_at)) + '</div>' +
-              '</div>' +
-              '<div class="good-hero-grid">' +
-                '<div class="good-hero-copy">' +
-                  '<div class="good-eyebrow">Active Subscription</div>' +
-                  '<h2 class="good-plan-title">' + escapeHtml(planLabel) + '</h2>' +
-                  '<div class="good-submeta">' +
-                    '<span>Key: <span class="mono">' + escapeHtml(licKey || "—") + '</span></span>' +
-                    (p && p.device_id ? '<span>Device: <span class="mono">' + escapeHtml(p.device_id) + '</span></span>' : '') +
-                    (p && p.note ? '<span>' + escapeHtml(p.note) + '</span>' : '') +
-                  '</div>' +
-                '</div>' +
-                '<div class="good-days-card">' +
-                  '<div class="good-days-num" id="home-days-counter">' + (daysRem !== null ? escapeHtml(daysRem) : "∞") + '</div>' +
-                  '<div class="good-days-label">' + (daysRem === 1 ? "Day Remaining" : "Days Remaining") + '</div>' +
-                  '<div class="good-days-date">Valid through ' + escapeHtml(expDate) + '</div>' +
-                '</div>' +
-              '</div>' +
-              '<div class="good-metrics">' +
-                '<div class="good-metric-card">' +
-                  '<div class="good-metric-k">Total Licenses</div>' +
-                  '<div class="good-metric-v" id="home-metric-total">' + escapeHtml(totalLic) + '</div>' +
-                  '<div class="good-metric-sub">' + escapeHtml(activeLic) + ' active &amp; healthy</div>' +
-                '</div>' +
-                '<div class="good-metric-card">' +
-                  '<div class="good-metric-k">Pending Payments</div>' +
-                  '<div class="good-metric-v">0</div>' +
-                  '<div class="good-metric-sub">Queue clear</div>' +
-                '</div>' +
-                '<div class="good-metric-card">' +
-                  '<div class="good-metric-k">Revenue This Month</div>' +
-                  '<div class="good-metric-v" id="home-metric-rev">' + escapeHtml(formatInr(revenueMonth)) + '</div>' +
-                  '<div class="good-metric-sub">' + escapeHtml(approvedMonth) + ' approved ' + (approvedMonth === 1 ? "payment" : "payments") + '</div>' +
-                '</div>' +
-              '</div>' +
-              fleetExtra +
+            '<div class="good-top-row">' +
+            '<div class="good-status-badge">' +
+            '<span class="good-beacon" aria-hidden="true"></span>' +
+            '<span>All Systems Active</span>' +
+            '</div>' +
+            '<div class="good-updated">Checked ' + escapeHtml(formatDate(s.generated_at)) + '</div>' +
+            '</div>' +
+            '<div class="good-hero-grid">' +
+            '<div class="good-hero-copy">' +
+            '<div class="good-eyebrow">Active Subscription</div>' +
+            '<h2 class="good-plan-title">' + escapeHtml(planLabel) + '</h2>' +
+            '<div class="good-submeta">' +
+            '<span>Key: <span class="mono">' + escapeHtml(licKey || "—") + '</span></span>' +
+            (p && p.device_id ? '<span>Device: <span class="mono">' + escapeHtml(p.device_id) + '</span></span>' : '') +
+            (p && p.note ? '<span>' + escapeHtml(p.note) + '</span>' : '') +
+            '</div>' +
+            '</div>' +
+            '<div class="good-days-card">' +
+            '<div class="good-days-num" id="home-days-counter">' + (daysRem !== null ? escapeHtml(daysRem) : "∞") + '</div>' +
+            '<div class="good-days-label">' + (daysRem === 1 ? "Day Remaining" : "Days Remaining") + '</div>' +
+            '<div class="good-days-date">Valid through ' + escapeHtml(expDate) + '</div>' +
+            '</div>' +
+            '</div>' +
+            '<div class="good-metrics">' +
+            '<div class="good-metric-card">' +
+            '<div class="good-metric-k">Total Licenses</div>' +
+            '<div class="good-metric-v" id="home-metric-total">' + escapeHtml(totalLic) + '</div>' +
+            '<div class="good-metric-sub">' + escapeHtml(activeLic) + ' active &amp; healthy</div>' +
+            '</div>' +
+            '<div class="good-metric-card">' +
+            '<div class="good-metric-k">Pending Payments</div>' +
+            '<div class="good-metric-v">0</div>' +
+            '<div class="good-metric-sub">Queue clear</div>' +
+            '</div>' +
+            '<div class="good-metric-card">' +
+            '<div class="good-metric-k">Revenue This Month</div>' +
+            '<div class="good-metric-v" id="home-metric-rev">' + escapeHtml(formatInr(revenueMonth)) + '</div>' +
+            '<div class="good-metric-sub">' + escapeHtml(approvedMonth) + ' approved ' + (approvedMonth === 1 ? "payment" : "payments") + '</div>' +
+            '</div>' +
+            '</div>' +
+            fleetExtra +
             '</div>';
 
           if (daysRem !== null) {
@@ -1474,67 +1659,67 @@
           const jumpKeyAttr = iss.license_key ? ' data-jump-key="' + escapeHtml(iss.license_key) + '"' : "";
           return (
             '<div class="plain-issue-row">' +
-              '<div class="plain-issue-main">' +
-                '<div class="plain-issue-title">' +
-                  '<span class="plain-issue-tag">' + escapeHtml(issueTypeTag(iss.type)) + '</span>' +
-                  '<span>' + escapeHtml(iss.title) + '</span>' +
-                '</div>' +
-                '<div class="plain-issue-detail">' + escapeHtml(iss.detail) + '</div>' +
-              '</div>' +
-              '<button type="button" class="plain-jump-btn" data-jump-tab="' + escapeHtml(target) + '"' + jumpKeyAttr + '>' +
-                escapeHtml(iss.action_label || "Open") +
-              '</button>' +
+            '<div class="plain-issue-main">' +
+            '<div class="plain-issue-title">' +
+            '<span class="plain-issue-tag">' + escapeHtml(issueTypeTag(iss.type)) + '</span>' +
+            '<span>' + escapeHtml(iss.title) + '</span>' +
+            '</div>' +
+            '<div class="plain-issue-detail">' + escapeHtml(iss.detail) + '</div>' +
+            '</div>' +
+            '<button type="button" class="plain-jump-btn" data-jump-tab="' + escapeHtml(target) + '"' + jumpKeyAttr + '>' +
+            escapeHtml(iss.action_label || "Open") +
+            '</button>' +
             '</div>'
           );
         }).join("");
 
         const secondaryActiveHtml = activeList.length > 0
           ? (
-              '<div class="plain-section">' +
-                '<div class="plain-section-head">Active Licenses (' + escapeHtml(activeList.length) + ')</div>' +
-                activeList.map(function (lic) {
-                  const daysStr = lic.days_remaining !== null && lic.days_remaining !== undefined
-                    ? lic.days_remaining + "d left"
-                    : "active";
-                  return (
-                    '<div class="plain-active-row">' +
-                      '<span><strong class="mono">' + escapeHtml(lic.license_key) + '</strong> — ' + escapeHtml(lic.plan_label || lic.plan) + '</span>' +
-                      '<span>' + escapeHtml(daysStr) + (lic.expires_date ? ' (expires ' + escapeHtml(lic.expires_date) + ')' : '') + '</span>' +
-                    '</div>'
-                  );
-                }).join("") +
-              '</div>'
-            )
+            '<div class="plain-section">' +
+            '<div class="plain-section-head">Active Licenses (' + escapeHtml(activeList.length) + ')</div>' +
+            activeList.map(function (lic) {
+              const daysStr = lic.days_remaining !== null && lic.days_remaining !== undefined
+                ? lic.days_remaining + "d left"
+                : "active";
+              return (
+                '<div class="plain-active-row">' +
+                '<span><strong class="mono">' + escapeHtml(lic.license_key) + '</strong> — ' + escapeHtml(lic.plan_label || lic.plan) + '</span>' +
+                '<span>' + escapeHtml(daysStr) + (lic.expires_date ? ' (expires ' + escapeHtml(lic.expires_date) + ')' : '') + '</span>' +
+                '</div>'
+              );
+            }).join("") +
+            '</div>'
+          )
           : "";
 
         root.innerHTML =
           '<div class="home-plain-shell" data-home-state="needs_attention">' +
-            '<div class="plain-banner">' +
-              '<h2>Needs Attention</h2>' +
-              '<p>' + escapeHtml(issueCountLabel) + '</p>' +
-            '</div>' +
-            '<div class="plain-metrics">' +
-              '<div class="plain-metric">' +
-                '<div class="plain-metric-k">Total Licenses</div>' +
-                '<div class="plain-metric-v">' + escapeHtml(totalLic) + '</div>' +
-                '<div class="plain-metric-sub">' + escapeHtml(activeLic) + ' active</div>' +
-              '</div>' +
-              '<div class="plain-metric">' +
-                '<div class="plain-metric-k">Pending Payments</div>' +
-                '<div class="plain-metric-v">' + escapeHtml(pendingPay) + '</div>' +
-                '<div class="plain-metric-sub">' + (pendingPay === 1 ? "1 awaiting review" : pendingPay + " awaiting review") + '</div>' +
-              '</div>' +
-              '<div class="plain-metric">' +
-                '<div class="plain-metric-k">Revenue This Month</div>' +
-                '<div class="plain-metric-v">' + escapeHtml(formatInr(revenueMonth)) + '</div>' +
-                '<div class="plain-metric-sub">' + escapeHtml(approvedMonth) + ' approved</div>' +
-              '</div>' +
-            '</div>' +
-            '<div class="plain-section">' +
-              '<div class="plain-section-head">Items Requiring Action (' + escapeHtml(issues.length) + ')</div>' +
-              (issuesHtml || '<div class="plain-issue-row">No specific items listed.</div>') +
-            '</div>' +
-            secondaryActiveHtml +
+          '<div class="plain-banner">' +
+          '<h2>Needs Attention</h2>' +
+          '<p>' + escapeHtml(issueCountLabel) + '</p>' +
+          '</div>' +
+          '<div class="plain-metrics">' +
+          '<div class="plain-metric">' +
+          '<div class="plain-metric-k">Total Licenses</div>' +
+          '<div class="plain-metric-v">' + escapeHtml(totalLic) + '</div>' +
+          '<div class="plain-metric-sub">' + escapeHtml(activeLic) + ' active</div>' +
+          '</div>' +
+          '<div class="plain-metric">' +
+          '<div class="plain-metric-k">Pending Payments</div>' +
+          '<div class="plain-metric-v">' + escapeHtml(pendingPay) + '</div>' +
+          '<div class="plain-metric-sub">' + (pendingPay === 1 ? "1 awaiting review" : pendingPay + " awaiting review") + '</div>' +
+          '</div>' +
+          '<div class="plain-metric">' +
+          '<div class="plain-metric-k">Revenue This Month</div>' +
+          '<div class="plain-metric-v">' + escapeHtml(formatInr(revenueMonth)) + '</div>' +
+          '<div class="plain-metric-sub">' + escapeHtml(approvedMonth) + ' approved</div>' +
+          '</div>' +
+          '</div>' +
+          '<div class="plain-section">' +
+          '<div class="plain-section-head">Items Requiring Action (' + escapeHtml(issues.length) + ')</div>' +
+          (issuesHtml || '<div class="plain-issue-row">No specific items listed.</div>') +
+          '</div>' +
+          secondaryActiveHtml +
           '</div>';
       }
 
@@ -1645,7 +1830,7 @@
           keyInput.value = "";
           noteInput.value = "";
           await loadLicenses();
-          loadSummary().catch(function () {});
+          loadSummary().catch(function () { });
           showToast("Created license " + licenseKey, "success");
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
@@ -1697,7 +1882,7 @@
           } else {
             showToast("Rejected submission #" + id, "success");
           }
-          Promise.all([loadLicenses(), loadHistory(), loadSummary()]).catch(function () {});
+          Promise.all([loadLicenses(), loadHistory(), loadSummary()]).catch(function () { });
         } catch (err) {
           buttons.forEach(function (b) { b.disabled = false; });
           if (err.message !== "Session expired") showToast(err.message, "error");
@@ -1728,7 +1913,7 @@
             return;
           }
           url = "/api/v1/admin/renew?license_key=" + encodeURIComponent(licenseKey) +
-                "&plan=" + encodeURIComponent(plan);
+            "&plan=" + encodeURIComponent(plan);
         } else {
           return;
         }
@@ -1737,7 +1922,7 @@
         try {
           await apiFetch(url, { method: "POST" });
           await loadLicenses();
-          loadSummary().catch(function () {});
+          loadSummary().catch(function () { });
           showToast("Updated " + licenseKey + " (" + action + ")", "success");
         } catch (err) {
           btn.disabled = false;
@@ -1784,4 +1969,5 @@
     })();
   </script>
 </body>
+
 </html>
