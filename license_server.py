@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -1114,15 +1115,14 @@ def _compute_days_remaining(expires_at: datetime | None, now: datetime) -> int |
 @app.get("/api/v1/admin/summary")
 def admin_dashboard_summary(
     warning_days: int = Query(default=7, ge=1, le=60),
-    x_admin_token: str | None = Header(default=None),
+    _auth: dict = Depends(_require_admin_api),
 ):
     """
-    Lightweight overview payload for the Admin Dashboard Home tab.
+    Lightweight overview payload for the Admin Dashboard Overview tab.
     Computes overall health state (`all_good` vs `needs_attention`), actionable
     issues, active fleet list, counts, and current-month approved revenue without
     transferring base64 payment screenshot blobs.
     """
-    _check_admin(x_admin_token)
     now = _utc_now()
 
     with get_db() as conn:
@@ -1247,7 +1247,7 @@ def admin_dashboard_summary(
             "severity": "action",
             "title": f"{n_pend} pending {noun}",
             "detail": "Manual UPI screenshot verification awaiting review.",
-            "target_tab": "payments",
+            "target_tab": "pending",
             "action_label": "Review Pending Payments",
         })
 
@@ -1286,17 +1286,6 @@ def admin_dashboard_summary(
     }
 
 
-_DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "admin_dashboard.html"
-
-
 @app.get("/", include_in_schema=False)
 def root_redirect():
-    return RedirectResponse(url="/admin")
-
-
-@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-def serve_admin_dashboard():
-    """Serve the lightweight mobile-friendly Admin Dashboard (Home, Licenses, Pending Payments)."""
-    if not _DASHBOARD_HTML_PATH.is_file():
-        raise HTTPException(status_code=500, detail="Admin dashboard HTML asset is missing.")
-    return HTMLResponse(content=_DASHBOARD_HTML_PATH.read_text(encoding="utf-8"))
+    return RedirectResponse(url="/admin", status_code=302)

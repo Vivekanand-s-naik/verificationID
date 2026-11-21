@@ -505,6 +505,64 @@
       border-radius: 6px;
       background: #111827;
     }
+    .summary-banner {
+      border-radius: var(--radius);
+      padding: 16px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      margin-bottom: 14px;
+    }
+    .summary-banner.good {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+      color: #065f46;
+    }
+    .summary-banner.attention {
+      background: #fffbeb;
+      border-color: #fde68a;
+      color: #92400e;
+    }
+    .summary-status {
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .stat-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .stat-value {
+      margin-top: 4px;
+      font-size: 1.5rem;
+      font-weight: 800;
+    }
+    .issue-item {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 0;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .issue-item:last-child { border-bottom: none; }
   </style>
 </head>
 <body>
@@ -531,6 +589,9 @@
       </button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
         History <span id="history-count" class="count-pill">0</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="home">
+        Overview
       </button>
     </nav>
 
@@ -568,6 +629,10 @@
       </div>
       <div id="history-list"></div>
     </section>
+
+    <section id="panel-home" class="panel" role="tabpanel">
+      <div id="home-summary"></div>
+    </section>
   </main>
 
   <div id="lightbox" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment screenshot preview">
@@ -597,6 +662,7 @@
         pending: [],
         licenses: [],
         history: [],
+        summary: null,
         licenseSearch: "",
       };
 
@@ -899,6 +965,80 @@
         root.innerHTML = '<div class="grid-cards">' + html + '</div>';
       }
 
+      function renderSummary() {
+        const root = document.getElementById("home-summary");
+        const s = state.summary;
+        if (!s) {
+          root.innerHTML = '<div class="empty-state">Loading overview...</div>';
+          return;
+        }
+        const c = s.counts || {};
+        const isGood = s.overall_state === "all_good";
+        const issues = s.issues || [];
+        const activeList = s.active_licenses || [];
+        const p = s.primary_license;
+
+        const bannerHtml =
+          '<div class="summary-banner ' + (isGood ? "good" : "attention") + '">' +
+            '<div class="summary-status">' + (isGood ? "ALL SYSTEMS ACTIVE" : "NEEDS ATTENTION") + '</div>' +
+            (isGood
+              ? '<div><strong>' + escapeHtml((p && p.license_key) || "All licenses") + '</strong> — ' +
+                escapeHtml((p && p.plan_label) || "Active") +
+                (p && p.days_remaining !== null && p.days_remaining !== undefined
+                  ? ' (' + escapeHtml(p.days_remaining) + 'd remaining)'
+                  : '') +
+                '</div>'
+              : '<div>' + escapeHtml(issues.length) + ' item(s) require attention.</div>') +
+          '</div>';
+
+        const statsHtml =
+          '<div class="stats-grid">' +
+            '<div class="stat-card"><div class="stat-label">Total Licenses</div><div class="stat-value">' + escapeHtml(c.total_licenses || 0) + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Active Licenses</div><div class="stat-value">' + escapeHtml(c.active_licenses || 0) + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Pending Payments</div><div class="stat-value">' + escapeHtml(c.pending_payments || 0) + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Revenue This Month</div><div class="stat-value">₹' + escapeHtml(Number(c.revenue_this_month_inr || 0).toLocaleString("en-IN")) + '</div></div>' +
+          '</div>';
+
+        const issuesHtml = issues.length
+          ? '<div class="card"><h2 class="card-title">Action Items</h2>' +
+              issues.map(function (iss) {
+                const target = iss.target_tab === "payments" ? "pending" : (iss.target_tab || "licenses");
+                return (
+                  '<div class="issue-item">' +
+                    '<div>' +
+                      '<div><strong>' + escapeHtml(iss.title) + '</strong></div>' +
+                      '<div class="session-meta">' + escapeHtml(iss.detail) + '</div>' +
+                    '</div>' +
+                    '<button type="button" class="btn btn-sm" data-jump-tab="' + escapeHtml(target) + '">' +
+                      escapeHtml(iss.action_label || "Open") +
+                    '</button>' +
+                  '</div>'
+                );
+              }).join("") +
+            '</div>'
+          : '';
+
+        const activeHtml = activeList.length
+          ? '<div class="card"><h2 class="card-title">Active Licenses (' + escapeHtml(activeList.length) + ')</h2>' +
+              activeList.map(function (lic) {
+                return (
+                  '<div class="issue-item">' +
+                    '<div><strong class="mono">' + escapeHtml(lic.license_key) + '</strong> · ' + escapeHtml(lic.plan_label) + '</div>' +
+                    '<div class="session-meta">' +
+                      (lic.days_remaining !== null && lic.days_remaining !== undefined
+                        ? escapeHtml(lic.days_remaining) + 'd left'
+                        : 'Active') +
+                      (lic.expires_date ? ' (expires ' + escapeHtml(lic.expires_date) + ')' : '') +
+                    '</div>' +
+                  '</div>'
+                );
+              }).join("") +
+            '</div>'
+          : '';
+
+        root.innerHTML = bannerHtml + statsHtml + issuesHtml + activeHtml;
+      }
+
       async function loadPending() {
         state.pending = await apiFetch("/api/v1/admin/payment-submissions?status=pending");
         renderPending();
@@ -918,6 +1058,11 @@
         renderHistory();
       }
 
+      async function loadSummary() {
+        state.summary = await apiFetch("/api/v1/admin/summary");
+        renderSummary();
+      }
+
       async function loadAllData() {
         const session = await apiFetch("/api/v1/admin/session");
         state.plans = session.plans || {};
@@ -925,7 +1070,7 @@
           "Signed in as " + (session.username || "admin") +
           (session.expires_at ? " • Session expires " + formatDate(session.expires_at) : "");
 
-        await Promise.all([loadPending(), loadLicenses(), loadHistory()]);
+        await Promise.all([loadPending(), loadLicenses(), loadHistory(), loadSummary()]);
       }
 
       document.querySelectorAll(".tab-btn").forEach(function (btn) {
@@ -1001,6 +1146,7 @@
           keyInput.value = "";
           noteInput.value = "";
           await loadLicenses();
+          loadSummary().catch(function () {});
           showToast("Created license " + licenseKey, "success");
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
@@ -1052,7 +1198,7 @@
           } else {
             showToast("Rejected submission #" + id, "success");
           }
-          Promise.all([loadLicenses(), loadHistory()]).catch(function () {});
+          Promise.all([loadLicenses(), loadHistory(), loadSummary()]).catch(function () {});
         } catch (err) {
           buttons.forEach(function (b) { b.disabled = false; });
           if (err.message !== "Session expired") showToast(err.message, "error");
@@ -1092,6 +1238,7 @@
         try {
           await apiFetch(url, { method: "POST" });
           await loadLicenses();
+          loadSummary().catch(function () {});
           showToast("Updated " + licenseKey + " (" + action + ")", "success");
         } catch (err) {
           btn.disabled = false;
@@ -1106,6 +1253,12 @@
         const id = Number(card && card.dataset.historyId);
         const sub = state.history.find(function (item) { return item.id === id; });
         if (sub) openLightbox(sub);
+      });
+
+      document.getElementById("home-summary").addEventListener("click", function (evt) {
+        const btn = evt.target.closest("[data-jump-tab]");
+        if (!btn) return;
+        setActiveTab(btn.dataset.jumpTab);
       });
 
       document.getElementById("lightbox-close").addEventListener("click", closeLightbox);

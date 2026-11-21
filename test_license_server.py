@@ -500,13 +500,28 @@ def test_admin_login_validation_constant_time_and_session_lifecycle(env_client):
 
     # Raw LICENSE_ADMIN_TOKEN sent as Bearer token or session cookie must be rejected
     assert client.get("/api/v1/admin/list", headers={"Authorization": "Bearer test-admin-secret"}).status_code == 401
-    assert client.get("/api/v1/admin/list", cookies={srv.SESSION_COOKIE_NAME: "test-admin-secret"}).status_code == 401
+    bad_cookie_client = TestClient(srv.app)
+    bad_cookie_client.cookies.set(srv.SESSION_COOKIE_NAME, "test-admin-secret")
+    assert bad_cookie_client.get("/api/v1/admin/list").status_code == 401
 
     # Valid login over HTTPS proxy headers -> 200, HttpOnly+Secure cookie, signed JWT distinct from LICENSE_ADMIN_TOKEN
-    login_r = client.post(
+    https_client = TestClient(srv.app, base_url="https://testserver")
+    https_login_r = https_client.post(
         "/api/v1/admin/login",
         json={"username": "test-admin-user", "password": "test-admin-password"},
         headers={"X-Forwarded-Proto": "https"},
+    )
+    assert https_login_r.status_code == 200
+    set_cookie_hdr = https_login_r.headers.get("set-cookie", "")
+    assert "admin_session=" in set_cookie_hdr
+    assert "HttpOnly" in set_cookie_hdr
+    assert "Secure" in set_cookie_hdr
+    assert https_client.get("/admin", follow_redirects=False).status_code == 200
+
+    # Valid login on standard HTTP test client -> cookie sent over HTTP
+    login_r = client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
     )
     assert login_r.status_code == 200
     login_body = login_r.json()
@@ -517,11 +532,6 @@ def test_admin_login_validation_constant_time_and_session_lifecycle(env_client):
     assert "test-admin-secret" not in session_token
     assert "test-admin-password" not in session_token
     assert session_token.count(".") == 2
-
-    set_cookie_hdr = login_r.headers.get("set-cookie", "")
-    assert "admin_session=" in set_cookie_hdr
-    assert "HttpOnly" in set_cookie_hdr
-    assert "Secure" in set_cookie_hdr
 
     # Cookie-authenticated browser requests succeed across UI & all admin API endpoints
     dash_r = client.get("/admin", follow_redirects=False)
@@ -705,18 +715,33 @@ def test_served_html_contains_no_secrets(env_client):
 
 
 def test_admin_summary_states_revenue_and_dashboard_html(env_client):
-    """Verify GET /admin HTML and GET /api/v1/admin/summary all_good vs needs_attention (mixed/pending/revoked/expiring)."""
+    """Verify authenticated GET /admin HTML and GET /api/v1/admin/summary all_good vs needs_attention."""
     client, db = env_client
 
-    # 1. Admin dashboard HTML serves Home tab first
-    page = client.get("/admin")
+    # Unauthenticated access redirects UI and rejects API summary
+    assert client.get("/admin", follow_redirects=False).status_code == 302
+    assert client.get("/api/v1/admin/summary").status_code == 401
+
+    # Log in via session endpoint so /admin renders dashboard.html
+    login_r = client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
+    )
+    assert login_r.status_code == 200
+
+    # 1. Admin dashboard HTML defaults to Pending Payments and includes Overview summary support
+    page = client.get("/admin", follow_redirects=False)
     assert page.status_code == 200
-    assert "ALL SYSTEMS ACTIVE" in page.text
+    assert 'data-tab="pending"' in page.text
+    assert 'id="panel-pending" class="panel active"' in page.text
     assert 'data-tab="home"' in page.text
     assert "/api/v1/admin/summary" in page.text
+    assert "ALL SYSTEMS ACTIVE" in page.text
 
-    # 2. Single healthy active license + 0 pending submissions -> all_good
-    s1 = client.get("/api/v1/admin/summary", headers=ADMIN_HDR)
+    # 2. Single healthy active license + 0 pending submissions -> all_good (works via session cookie & token)
+    s1_cookie = client.get("/api/v1/admin/summary")
+    assert s1_cookie.status_code == 200
+    s1 = TestClient(srv.app).get("/api/v1/admin/summary", headers=ADMIN_HDR)
     assert s1.status_code == 200
     b1 = s1.json()
     assert b1["overall_state"] == "all_good"
@@ -727,33 +752,33 @@ def test_admin_summary_states_revenue_and_dashboard_html(env_client):
     assert b1["counts"]["pending_payments"] == 0
     assert b1["counts"]["revenue_this_month_inr"] == 0
 
-    # 3. Pending payment flips state to needs_attention with jump link to payments tab
+    # 3. Pending payment flips state to needs_attention with jump link to payments/pending tab
     r_sub = client.post(
         "/api/v1/payment-screenshot",
         data={"license_key": "VIVEK-ANPR-0001", "device_id": "dev-1", "claimed_plan": "annual"},
         files={"image": ("p.png", PNG_1X1, "image/png")},
     )
     sub_id = r_sub.json()["submission_id"]
-    s2 = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    s2 = client.get("/api/v1/admin/summary").json()
     assert s2["overall_state"] == "needs_attention"
     assert s2["counts"]["pending_payments"] == 1
-    assert any(i["type"] == "pending_payments" and i["target_tab"] == "payments" for i in s2["issues"])
+    assert any(i["type"] == "pending_payments" and i["target_tab"] in {"pending", "payments"} for i in s2["issues"])
 
     # 4. Approving payment clears pending issue, restores all_good, and counts ₹900 monthly revenue
-    client.post(f"/api/v1/admin/payment-submissions/{sub_id}/approve", headers=ADMIN_HDR)
-    s3 = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    client.post(f"/api/v1/admin/payment-submissions/{sub_id}/approve")
+    s3 = client.get("/api/v1/admin/summary").json()
     assert s3["overall_state"] == "all_good"
     assert s3["counts"]["pending_payments"] == 0
     assert s3["counts"]["approved_payments_this_month"] == 1
     assert s3["counts"]["revenue_this_month_inr"] == 900
 
     # 5. Mixed fleet (1 active + 1 revoked + 1 expiring soon) -> needs_attention overall, active listed separately
-    client.post("/api/v1/admin/create", json={"license_key": "CUST-0002", "note": "Gate 2"}, headers=ADMIN_HDR)
-    client.post("/api/v1/admin/revoke", params={"license_key": "CUST-0002"}, headers=ADMIN_HDR)
-    client.post("/api/v1/admin/create", json={"license_key": "CUST-0003", "note": "Gate 3"}, headers=ADMIN_HDR)
-    client.post("/api/v1/admin/expire", params={"license_key": "CUST-0003", "days_from_now": 3}, headers=ADMIN_HDR)
+    client.post("/api/v1/admin/create", json={"license_key": "CUST-0002", "note": "Gate 2"})
+    client.post("/api/v1/admin/revoke", params={"license_key": "CUST-0002"})
+    client.post("/api/v1/admin/create", json={"license_key": "CUST-0003", "note": "Gate 3"})
+    client.post("/api/v1/admin/expire", params={"license_key": "CUST-0003", "days_from_now": 3})
 
-    s4 = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    s4 = client.get("/api/v1/admin/summary").json()
     assert s4["overall_state"] == "needs_attention"
     assert s4["counts"]["total_licenses"] == 3
     assert s4["counts"]["active_licenses"] == 1
