@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import time
 from contextlib import contextmanager
@@ -40,12 +41,19 @@ ADMIN_PAGE_CSP = (
     "img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 )
 
-PLANS = {
-    "monthly":   {"days": 30,  "price_inr": 150, "label": "Monthly"},
-    "quarterly": {"days": 90,  "price_inr": 300, "label": "Quarterly"},
-    "annual":    {"days": 365, "price_inr": 900, "label": "Annual"},
-    "launch90":  {"days": 90,  "price_inr": 200, "label": "Launch Offer — 90 days"},
+DEFAULT_PLANS = {
+    "monthly":   {"days": 30,  "price_inr": 150, "label": "Monthly",                "sort_order": 10},
+    "quarterly": {"days": 90,  "price_inr": 300, "label": "Quarterly",              "sort_order": 20},
+    "annual":    {"days": 365, "price_inr": 900, "label": "Annual",                 "sort_order": 30},
+    "launch90":  {"days": 90,  "price_inr": 200, "label": "Launch Offer — 90 days", "sort_order": 5},
 }
+# Backward-compatible reference to initial seed plan definitions; runtime routes read `subscription_plans` DB table.
+PLANS = {
+    k: {"days": v["days"], "price_inr": v["price_inr"], "label": v["label"]}
+    for k, v in DEFAULT_PLANS.items()
+}
+_PLAN_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
+VALID_BROADCAST_TONES = {"notice", "info", "warning"}
 
 app = FastAPI(title="ANPR License & Subscription Server")
 
@@ -197,6 +205,45 @@ def init_db():
                 ON license_audit_log (created_at DESC)
             """)
 
+            # Live-editable subscription plans (seeded once from DEFAULT_PLANS on first run)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subscription_plans (
+                    plan_key TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    days INTEGER NOT NULL,
+                    price_inr INTEGER NOT NULL,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    sort_order INTEGER NOT NULL DEFAULT 100,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            # Server-to-client broadcast notifications + per-device acknowledgments
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_messages (
+                    id SERIAL PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    tone TEXT NOT NULL DEFAULT 'notice',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by TEXT NOT NULL DEFAULT 'owner'
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_broadcast_messages_active_time
+                ON broadcast_messages (active, created_at DESC)
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_acknowledgments (
+                    broadcast_id INTEGER NOT NULL REFERENCES broadcast_messages(id) ON DELETE CASCADE,
+                    device_id TEXT NOT NULL,
+                    acknowledged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (broadcast_id, device_id)
+                )
+            """)
+
+            _seed_default_plans(cur)
             _seed_initial_owner_user(cur)
 
 
@@ -247,6 +294,109 @@ def _get_seed_owner_credentials() -> tuple[str | None, str | None, str | None]:
     if not username or not password:
         return None, None, email
     return username, password, email
+
+
+def _seed_default_plans(cur) -> bool:
+    """Seed initial subscription_plans rows from DEFAULT_PLANS ONLY when the table is empty."""
+    cur.execute("SELECT COUNT(*) AS cnt FROM subscription_plans")
+    row = cur.fetchone()
+    if int((row or {}).get("cnt", 0)) > 0:
+        return False
+    now = _utc_now()
+    for plan_key, meta in DEFAULT_PLANS.items():
+        cur.execute(
+            """
+            INSERT INTO subscription_plans (plan_key, label, days, price_inr, active, sort_order, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (plan_key) DO NOTHING
+            """,
+            (
+                plan_key,
+                meta["label"],
+                int(meta["days"]),
+                int(meta["price_inr"]),
+                True,
+                int(meta.get("sort_order", 100)),
+                now,
+            ),
+        )
+    logger.info("Seeded %d default subscription plans into subscription_plans.", len(DEFAULT_PLANS))
+    return True
+
+
+def _load_plans_map(cur, include_inactive: bool = False) -> dict[str, dict]:
+    """Read subscription plans from DB (auto-seeding once on an empty table)."""
+    _seed_default_plans(cur)
+    if include_inactive:
+        cur.execute(
+            """
+            SELECT plan_key, label, days, price_inr, active, sort_order, updated_at
+            FROM subscription_plans
+            ORDER BY sort_order ASC, plan_key ASC
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT plan_key, label, days, price_inr, active, sort_order, updated_at
+            FROM subscription_plans
+            WHERE active = TRUE
+            ORDER BY sort_order ASC, plan_key ASC
+            """
+        )
+    rows = cur.fetchall()
+    result: dict[str, dict] = {}
+    for r in rows:
+        pk = str(r["plan_key"]).strip().lower()
+        result[pk] = {
+            "days": int(r["days"]),
+            "price_inr": int(r["price_inr"]),
+            "label": str(r["label"]),
+            "active": bool(r.get("active", True)),
+            "sort_order": int(r.get("sort_order", 100)),
+            "updated_at": _iso_utc(r.get("updated_at")),
+        }
+    return result
+
+
+def _public_plans_dict(plans_map: dict[str, dict]) -> dict[str, dict]:
+    """Shape plan metadata for public /api/v1/plans and dashboard dropdowns."""
+    return {
+        pk: {
+            "days": int(meta["days"]),
+            "price_inr": int(meta["price_inr"]),
+            "label": str(meta["label"]),
+        }
+        for pk, meta in plans_map.items()
+    }
+
+
+def _fetch_unacked_broadcasts(cur, device_id: str | None) -> list[dict]:
+    """Return active broadcast messages not yet acknowledged by `device_id`."""
+    dev = (device_id or "").strip()
+    if not dev:
+        return []
+    cur.execute(
+        """
+        SELECT b.id, b.message, b.tone, b.created_at
+        FROM broadcast_messages b
+        LEFT JOIN broadcast_acknowledgments a
+          ON a.broadcast_id = b.id AND a.device_id = %s
+        WHERE b.active = TRUE AND a.broadcast_id IS NULL
+        ORDER BY b.created_at ASC, b.id ASC
+        """,
+        (dev,),
+    )
+    rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "message": str(r["message"]),
+            "tone": str(r.get("tone") or "notice"),
+            "created_at": _iso_utc(r.get("created_at")),
+        }
+        for r in rows
+    ]
 
 
 def _seed_initial_owner_user(cur) -> bool:
@@ -492,7 +642,7 @@ def _require_owner_or_token(request: Request, x_admin_token: str | None = Header
             raise HTTPException(status_code=401, detail="Invalid or expired session.")
         _check_admin(_get_admin_token())
         if (session.get("role") or "").strip().lower() != "owner":
-            raise HTTPException(status_code=403, detail="SystemOwner (owner) privileges are required for plan reset.")
+            raise HTTPException(status_code=403, detail="SystemOwner (owner) privileges are required for this action.")
         return session
     if x_admin_token is not None:
         _check_admin(x_admin_token)
@@ -589,10 +739,12 @@ def _apply_renewal(
     Extends expires_at by PLANS[plan]['days'] from max(now, current expires_at).
     """
     plan_key = (plan or "").strip().lower()
-    if plan_key not in PLANS:
+    all_plans = _load_plans_map(cur, include_inactive=True)
+    if plan_key not in all_plans:
+        active_plans = {k for k, v in all_plans.items() if v.get("active", True)}
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid plan '{plan}'. Allowed plans: {', '.join(PLANS.keys())}",
+            detail=f"Invalid plan '{plan}'. Allowed plans: {', '.join(sorted(active_plans))}",
         )
 
     cur.execute(
@@ -608,7 +760,7 @@ def _apply_renewal(
     prev_plan = (row.get("plan") or "trial").strip().lower()
     prev_paid = bool(row.get("has_paid_renewal", False))
     base_time = max(now, current_exp) if current_exp is not None else now
-    days_to_add = int(PLANS[plan_key]["days"])
+    days_to_add = int(all_plans[plan_key]["days"])
     new_expires_at = base_time + timedelta(days=days_to_add)
 
     cur.execute(
@@ -668,10 +820,11 @@ def _apply_plan_reset(cur, license_key: str, plan: str, actor: str = "owner") ->
     eligibility is available again for real customer handover.
     """
     plan_key = (plan or "").strip().lower()
-    if plan_key != "trial" and plan_key not in PLANS:
+    all_plans = _load_plans_map(cur, include_inactive=True)
+    if plan_key != "trial" and plan_key not in all_plans:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid plan '{plan}'. Allowed plans: trial, {', '.join(PLANS.keys())}",
+            detail=f"Invalid plan '{plan}'. Allowed plans: trial, {', '.join(all_plans.keys())}",
         )
 
     cur.execute(
@@ -687,7 +840,7 @@ def _apply_plan_reset(cur, license_key: str, plan: str, actor: str = "owner") ->
     prev_plan = (row.get("plan") or "trial").strip().lower()
     prev_paid = bool(row.get("has_paid_renewal", False))
 
-    reset_days = TRIAL_DAYS if plan_key == "trial" else int(PLANS[plan_key]["days"])
+    reset_days = TRIAL_DAYS if plan_key == "trial" else int(all_plans[plan_key]["days"])
     new_expires_at = now + timedelta(days=reset_days)
     new_has_paid = False if plan_key == "trial" else True
 
@@ -752,6 +905,7 @@ def _send_telegram_payment_notification(
     submitted_at: datetime,
     image_bytes: bytes,
     content_type: str,
+    plan_info: dict | None = None,
 ) -> bool:
     """
     Forward uploaded UPI payment screenshot + details to the licensor's Telegram chat
@@ -763,10 +917,10 @@ def _send_telegram_payment_notification(
         logger.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured; skipping Telegram notification.")
         return False
 
-    plan_info = PLANS.get(claimed_plan, {})
-    label = plan_info.get("label", claimed_plan)
-    price = plan_info.get("price_inr", "?")
-    days = plan_info.get("days", "?")
+    plan_meta = plan_info or PLANS.get(claimed_plan, {})
+    label = plan_meta.get("label", claimed_plan)
+    price = plan_meta.get("price_inr", "?")
+    days = plan_meta.get("days", "?")
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(content_type, "png")
 
     base_url = (os.environ.get("PUBLIC_BASE_URL") or "https://verificationid.onrender.com").rstrip("/")
@@ -807,6 +961,32 @@ class ValidateResponse(BaseModel):
     message: str | None = None
     expires_at: str | None = None
     plan: str | None = None
+    broadcasts: list[dict] = []
+
+
+class BroadcastAckRequest(BaseModel):
+    license_key: str
+    device_id: str
+
+
+class CreateBroadcastRequest(BaseModel):
+    message: str
+    tone: str = "notice"
+
+
+class CreatePlanRequest(BaseModel):
+    plan_key: str
+    label: str
+    days: int
+    price_inr: int
+    active: bool = True
+
+
+class UpdatePlanRequest(BaseModel):
+    label: str | None = None
+    days: int | None = None
+    price_inr: int | None = None
+    active: bool | None = None
 
 
 class CreateLicenseRequest(BaseModel):
@@ -832,13 +1012,15 @@ class UpdateOwnerAccountRequest(BaseModel):
 @app.get("/api/v1/plans")
 def get_plans(license_key: str | None = Query(default=None)):
     """
-    Public endpoint returning available subscription plans plus whether the given
-    license_key qualifies for the first-time paid renewal Launch Offer (launch90).
+    Public endpoint returning active subscription plans from the `subscription_plans`
+    database table plus whether the given license_key qualifies for first-time
+    paid renewal Launch Offer (`launch90`).
     """
     first_paid = False
-    if license_key:
-        with get_db() as conn:
-            with conn.cursor() as cur:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            active_plans = _load_plans_map(cur, include_inactive=False)
+            if license_key:
                 cur.execute(
                     "SELECT license_key, plan, has_paid_renewal FROM licenses WHERE license_key = %s",
                     (license_key.strip(),),
@@ -847,7 +1029,7 @@ def get_plans(license_key: str | None = Query(default=None)):
                 first_paid = _is_first_paid_renewal(row)
 
     return {
-        "plans": PLANS,
+        "plans": _public_plans_dict(active_plans),
         "is_first_paid_renewal": first_paid,
         "upi_vpa": (os.environ.get("UPI_VPA") or "").strip(),
         "upi_name": (os.environ.get("UPI_PAYEE_NAME") or "").strip(),
@@ -875,6 +1057,8 @@ def validate(req: ValidateRequest):
                 (req.device_id, req.app_version, now, req.license_key),
             )
 
+            broadcasts = _fetch_unacked_broadcasts(cur, req.device_id)
+
             # Revoked is an active licensor action and always takes precedence over expiry
             if status == "revoked":
                 return ValidateResponse(
@@ -882,6 +1066,7 @@ def validate(req: ValidateRequest):
                     message="This license has been revoked by the licensor.",
                     expires_at=expires_iso,
                     plan=plan,
+                    broadcasts=broadcasts,
                 )
 
             # Check plan / trial expiration timestamp
@@ -891,6 +1076,7 @@ def validate(req: ValidateRequest):
                     message="Your subscription or trial period has expired. Please renew to continue.",
                     expires_at=expires_iso,
                     plan=plan,
+                    broadcasts=broadcasts,
                 )
 
             if status == "active":
@@ -898,6 +1084,7 @@ def validate(req: ValidateRequest):
                     status="active",
                     expires_at=expires_iso,
                     plan=plan,
+                    broadcasts=broadcasts,
                 )
 
             return ValidateResponse(
@@ -905,7 +1092,36 @@ def validate(req: ValidateRequest):
                 message="This license is not active.",
                 expires_at=expires_iso,
                 plan=plan,
+                broadcasts=broadcasts,
             )
+
+
+@app.post("/api/v1/broadcasts/{broadcast_id}/ack")
+def acknowledge_broadcast_endpoint(broadcast_id: int, req: BroadcastAckRequest):
+    """Mark an active broadcast message acknowledged by a specific device_id so it does not reappear."""
+    key = (req.license_key or "").strip()
+    dev = (req.device_id or "").strip()
+    if not key or not dev:
+        raise HTTPException(status_code=400, detail="license_key and device_id are required.")
+
+    now = _utc_now()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT license_key FROM licenses WHERE license_key = %s", (key,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="License key not recognized.")
+            cur.execute("SELECT id FROM broadcast_messages WHERE id = %s", (broadcast_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Broadcast message not found.")
+            cur.execute(
+                """
+                INSERT INTO broadcast_acknowledgments (broadcast_id, device_id, acknowledged_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (broadcast_id, device_id) DO NOTHING
+                """,
+                (broadcast_id, dev, now),
+            )
+    return {"ok": True, "broadcast_id": broadcast_id, "device_id": dev, "acknowledged_at": now.isoformat()}
 
 
 @app.post("/api/v1/payment-screenshot")
@@ -924,12 +1140,6 @@ async def submit_payment_screenshot(
     dev = device_id.strip()
     plan_key = claimed_plan.strip().lower()
 
-    if plan_key not in PLANS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid plan '{claimed_plan}'. Allowed plans: {', '.join(PLANS.keys())}",
-        )
-
     raw_bytes = await image.read(MAX_SCREENSHOT_BYTES + 1)
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded screenshot image is empty.")
@@ -945,6 +1155,14 @@ async def submit_payment_screenshot(
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            active_plans = _load_plans_map(cur, include_inactive=False)
+            if plan_key not in active_plans:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid or inactive plan '{claimed_plan}'. Allowed plans: {', '.join(active_plans.keys())}",
+                )
+            claimed_plan_meta = active_plans[plan_key]
+
             cur.execute(
                 "SELECT license_key, status, plan, has_paid_renewal FROM licenses WHERE license_key = %s",
                 (key,),
@@ -1008,6 +1226,7 @@ async def submit_payment_screenshot(
         submitted_at=submitted_at,
         image_bytes=raw_bytes,
         content_type=mime_type,
+        plan_info=claimed_plan_meta,
     )
 
     return {
@@ -1124,6 +1343,9 @@ def admin_logout(request: Request, response: Response):
 
 @app.get("/api/v1/admin/session")
 def get_admin_session(session: dict = Depends(_require_admin_session)):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            active_plans = _load_plans_map(cur, include_inactive=False)
     return {
         "authenticated": True,
         "user_id": session.get("user_id"),
@@ -1132,7 +1354,7 @@ def get_admin_session(session: dict = Depends(_require_admin_session)):
         "role": session.get("role", "owner"),
         "is_owner": (session.get("role") or "").lower() == "owner",
         "expires_at": session["expires_at"],
-        "plans": PLANS,
+        "plans": _public_plans_dict(active_plans),
     }
 
 
@@ -1356,22 +1578,23 @@ def admin_dashboard_page(request: Request):
 @app.post("/api/v1/admin/create")
 def create_license(req: CreateLicenseRequest, _auth: dict = Depends(_require_admin_api)):
     plan_key = (req.plan or "trial").strip().lower()
-    if plan_key != "trial" and plan_key not in PLANS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid plan '{req.plan}'. Use 'trial' or one of: {', '.join(PLANS.keys())}",
-        )
-
-    duration_days = (
-        int(req.days)
-        if req.days is not None
-        else (TRIAL_DAYS if plan_key == "trial" else int(PLANS[plan_key]["days"]))
-    )
-    expires_at = _utc_now() + timedelta(days=max(1, duration_days))
-    has_paid = plan_key != "trial"
-
     with get_db() as conn:
         with conn.cursor() as cur:
+            all_plans = _load_plans_map(cur, include_inactive=True)
+            if plan_key != "trial" and plan_key not in all_plans:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid plan '{req.plan}'. Use 'trial' or one of: {', '.join(all_plans.keys())}",
+                )
+
+            duration_days = (
+                int(req.days)
+                if req.days is not None
+                else (TRIAL_DAYS if plan_key == "trial" else int(all_plans[plan_key]["days"]))
+            )
+            expires_at = _utc_now() + timedelta(days=max(1, duration_days))
+            has_paid = plan_key != "trial"
+
             cur.execute(
                 """
                 INSERT INTO licenses (license_key, status, note, plan, expires_at, has_paid_renewal)
@@ -1543,6 +1766,7 @@ def list_payment_submissions(
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            all_plans = _load_plans_map(cur, include_inactive=True)
             if status_filter == "all":
                 cur.execute(
                     """
@@ -1568,7 +1792,7 @@ def list_payment_submissions(
     results = []
     for row in rows:
         plan_key = row["claimed_plan"]
-        plan_meta = PLANS.get(plan_key, {})
+        plan_meta = all_plans.get(plan_key, {})
         mime = row.get("content_type") or "image/png"
         b64 = row["image_data"]
         results.append({
@@ -1685,11 +1909,12 @@ def reject_payment_submission(
     }
 
 
-def _plan_display_label(plan_key: str | None) -> str:
+def _plan_display_label(plan_key: str | None, plans_map: dict[str, dict] | None = None) -> str:
     k = (plan_key or "trial").strip().lower()
     if k == "trial":
         return "Free Trial"
-    info = PLANS.get(k)
+    source = plans_map if plans_map is not None else PLANS
+    info = source.get(k)
     return info["label"] if info else k.title()
 
 
@@ -1718,6 +1943,7 @@ def admin_dashboard_summary(
 
     with get_db() as conn:
         with conn.cursor() as cur:
+            all_plans = _load_plans_map(cur, include_inactive=True)
             cur.execute(
                 """
                 SELECT license_key, status, plan, expires_at, has_paid_renewal,
@@ -1767,7 +1993,7 @@ def admin_dashboard_summary(
                 "license_key": key,
                 "severity": "critical",
                 "title": f"{key} — Revoked",
-                "detail": f"License is manually revoked ({_plan_display_label(plan)}).",
+                "detail": f"License is manually revoked ({_plan_display_label(plan, all_plans)}).",
                 "target_tab": "licenses",
                 "action_label": "Manage in Licenses",
             })
@@ -1779,7 +2005,7 @@ def admin_dashboard_summary(
                 "license_key": key,
                 "severity": "critical",
                 "title": f"{key} — Expired",
-                "detail": f"{_plan_display_label(plan)} expired on {exp_dt.strftime('%Y-%m-%d')}.",
+                "detail": f"{_plan_display_label(plan, all_plans)} expired on {exp_dt.strftime('%Y-%m-%d')}.",
                 "target_tab": "licenses",
                 "action_label": "Renew in Licenses",
             })
@@ -1792,7 +2018,7 @@ def admin_dashboard_summary(
                 "license_key": key,
                 "severity": "warning",
                 "title": f"{key} — Expiring in {days_rem} {unit}",
-                "detail": f"{_plan_display_label(plan)} ends on {exp_dt.strftime('%Y-%m-%d')}.",
+                "detail": f"{_plan_display_label(plan, all_plans)} ends on {exp_dt.strftime('%Y-%m-%d')}.",
                 "target_tab": "licenses",
                 "action_label": "View in Licenses",
             })
@@ -1805,7 +2031,7 @@ def admin_dashboard_summary(
             "status": raw_status,
             "effective_status": eff,
             "plan": plan,
-            "plan_label": _plan_display_label(plan),
+            "plan_label": _plan_display_label(plan, all_plans),
             "expires_at": _iso_utc(exp_dt),
             "expires_date": exp_dt.strftime("%Y-%m-%d") if exp_dt else None,
             "days_remaining": days_rem,
@@ -1826,7 +2052,7 @@ def admin_dashboard_summary(
             sub_dt = _as_utc(sub.get("submitted_at"))
             if sub_dt is not None and sub_dt.year == now.year and sub_dt.month == now.month:
                 counts["approved_payments_this_month"] += 1
-                plan_meta = PLANS.get((sub.get("claimed_plan") or "").strip().lower(), {})
+                plan_meta = all_plans.get((sub.get("claimed_plan") or "").strip().lower(), {})
                 counts["revenue_this_month_inr"] += int(plan_meta.get("price_inr") or 0)
 
     if counts["pending_payments"] > 0:
@@ -1874,6 +2100,245 @@ def admin_dashboard_summary(
         "counts": counts,
         "warning_days": warning_days,
         "generated_at": now.isoformat(),
+    }
+
+
+# ========================================= OWNER BROADCASTS & LIVE PRICING
+@app.get("/api/v1/admin/broadcasts")
+def list_broadcasts(_auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: list all server-to-client broadcast messages with acknowledgment counts."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT b.id, b.message, b.tone, b.created_at, b.active, b.created_by,
+                       COUNT(a.device_id) AS ack_count
+                FROM broadcast_messages b
+                LEFT JOIN broadcast_acknowledgments a ON a.broadcast_id = b.id
+                GROUP BY b.id
+                ORDER BY b.created_at DESC, b.id DESC
+                """
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "message": str(r["message"]),
+            "tone": str(r.get("tone") or "notice"),
+            "active": bool(r.get("active", False)),
+            "created_by": str(r.get("created_by") or "owner"),
+            "created_at": _iso_utc(r.get("created_at")),
+            "ack_count": int(r.get("ack_count") or 0),
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/v1/admin/broadcasts")
+def create_broadcast(req: CreateBroadcastRequest, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: publish a new active broadcast notification to client apps."""
+    msg = (req.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Broadcast message cannot be empty.")
+    if len(msg) > 2000:
+        raise HTTPException(status_code=400, detail="Broadcast message must be 2000 characters or fewer.")
+    tone = (req.tone or "notice").strip().lower()
+    if tone not in VALID_BROADCAST_TONES:
+        tone = "notice"
+
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO broadcast_messages (message, tone, created_at, active, created_by)
+                VALUES (%s, %s, %s, TRUE, %s)
+                RETURNING id, message, tone, created_at, active, created_by
+                """,
+                (msg, tone, now, actor),
+            )
+            row = cur.fetchone()
+    logger.info("[BROADCAST CREATED] id=%s actor=%s tone=%s len=%d", row["id"], actor, tone, len(msg))
+    return {
+        "ok": True,
+        "id": int(row["id"]),
+        "message": str(row["message"]),
+        "tone": str(row.get("tone") or tone),
+        "active": bool(row.get("active", True)),
+        "created_by": str(row.get("created_by") or actor),
+        "created_at": _iso_utc(row.get("created_at") or now),
+        "ack_count": 0,
+    }
+
+
+@app.post("/api/v1/admin/broadcasts/{broadcast_id}/deactivate")
+def deactivate_broadcast(broadcast_id: int, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: deactivate a broadcast so devices that haven't seen it will no longer receive it."""
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE broadcast_messages SET active = FALSE WHERE id = %s", (broadcast_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Broadcast message not found.")
+    logger.info("[BROADCAST DEACTIVATED] id=%s actor=%s", broadcast_id, actor)
+    return {"ok": True, "id": broadcast_id, "active": False}
+
+
+@app.post("/api/v1/admin/broadcasts/{broadcast_id}/activate")
+def activate_broadcast(broadcast_id: int, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: re-enable a previously deactivated broadcast."""
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE broadcast_messages SET active = TRUE WHERE id = %s", (broadcast_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Broadcast message not found.")
+    logger.info("[BROADCAST ACTIVATED] id=%s actor=%s", broadcast_id, actor)
+    return {"ok": True, "id": broadcast_id, "active": True}
+
+
+@app.get("/api/v1/admin/plans")
+def list_admin_plans(_auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: list all subscription plans (active and inactive) from `subscription_plans`."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            all_plans = _load_plans_map(cur, include_inactive=True)
+    return [
+        {
+            "plan_key": pk,
+            "label": meta["label"],
+            "days": int(meta["days"]),
+            "price_inr": int(meta["price_inr"]),
+            "active": bool(meta["active"]),
+            "sort_order": int(meta.get("sort_order", 100)),
+            "updated_at": meta.get("updated_at"),
+            "first_renewal_only": pk == "launch90",
+        }
+        for pk, meta in all_plans.items()
+    ]
+
+
+@app.post("/api/v1/admin/plans")
+def create_admin_plan(req: CreatePlanRequest, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: add a new live subscription plan to `subscription_plans`."""
+    pk = (req.plan_key or "").strip().lower()
+    label = (req.label or "").strip()
+    if pk == "trial" or not _PLAN_KEY_RE.match(pk):
+        raise HTTPException(
+            status_code=400,
+            detail="Plan key must be 2–32 lowercase letters, digits, hyphens, or underscores (cannot be 'trial').",
+        )
+    if not label:
+        raise HTTPException(status_code=400, detail="Plan label cannot be empty.")
+    if int(req.days) < 1 or int(req.days) > 3650:
+        raise HTTPException(status_code=400, detail="Plan days must be between 1 and 3650.")
+    if int(req.price_inr) < 1 or int(req.price_inr) > 1000000:
+        raise HTTPException(status_code=400, detail="Plan price_inr must be between 1 and 1000000.")
+
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _seed_default_plans(cur)
+            cur.execute(
+                "SELECT plan_key, label, days, price_inr, active, sort_order, updated_at FROM subscription_plans WHERE plan_key = %s",
+                (pk,),
+            )
+            if cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail=f"Plan '{pk}' already exists.")
+            cur.execute(
+                """
+                INSERT INTO subscription_plans (plan_key, label, days, price_inr, active, sort_order, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (pk, label, int(req.days), int(req.price_inr), bool(req.active), 100, now),
+            )
+            _record_license_audit(
+                cur,
+                license_key=f"PLAN:{pk}",
+                action="plan_created",
+                actor=actor,
+                new_plan=pk,
+                note=f"Created plan '{pk}' ({label}, ₹{int(req.price_inr)} / {int(req.days)}d, active={bool(req.active)})",
+            )
+    logger.info("[PLAN CREATED] actor=%s plan=%s price=₹%s days=%s", actor, pk, int(req.price_inr), int(req.days))
+    return {
+        "ok": True,
+        "plan_key": pk,
+        "label": label,
+        "days": int(req.days),
+        "price_inr": int(req.price_inr),
+        "active": bool(req.active),
+        "updated_at": now.isoformat(),
+        "first_renewal_only": pk == "launch90",
+    }
+
+
+@app.put("/api/v1/admin/plans/{plan_key}")
+def update_admin_plan(plan_key: str, req: UpdatePlanRequest, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: update a plan's label, price_inr, days, or active state live in DB."""
+    pk = (plan_key or "").strip().lower()
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _seed_default_plans(cur)
+            cur.execute(
+                "SELECT plan_key, label, days, price_inr, active, sort_order, updated_at FROM subscription_plans WHERE plan_key = %s",
+                (pk,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                raise HTTPException(status_code=404, detail=f"Plan '{pk}' not found.")
+
+            new_label = (req.label if req.label is not None else str(existing["label"])).strip()
+            new_days = int(req.days) if req.days is not None else int(existing["days"])
+            new_price = int(req.price_inr) if req.price_inr is not None else int(existing["price_inr"])
+            new_active = bool(req.active) if req.active is not None else bool(existing.get("active", True))
+
+            if not new_label:
+                raise HTTPException(status_code=400, detail="Plan label cannot be empty.")
+            if new_days < 1 or new_days > 3650:
+                raise HTTPException(status_code=400, detail="Plan days must be between 1 and 3650.")
+            if new_price < 1 or new_price > 1000000:
+                raise HTTPException(status_code=400, detail="Plan price_inr must be between 1 and 1000000.")
+
+            cur.execute(
+                """
+                UPDATE subscription_plans
+                SET label = %s, days = %s, price_inr = %s, active = %s, updated_at = %s
+                WHERE plan_key = %s
+                """,
+                (new_label, new_days, new_price, new_active, now, pk),
+            )
+            _record_license_audit(
+                cur,
+                license_key=f"PLAN:{pk}",
+                action="plan_updated",
+                actor=actor,
+                previous_plan=pk,
+                new_plan=pk,
+                note=(
+                    f"Updated plan '{pk}': label='{existing['label']}'->'{new_label}', "
+                    f"price=₹{existing['price_inr']}->₹{new_price}, days={existing['days']}->{new_days}, "
+                    f"active={bool(existing.get('active', True))}->{new_active}"
+                ),
+            )
+    logger.info(
+        "[PLAN UPDATED] actor=%s plan=%s price=₹%s->₹%s days=%s active=%s",
+        actor, pk, existing["price_inr"], new_price, new_days, new_active,
+    )
+    return {
+        "ok": True,
+        "plan_key": pk,
+        "label": new_label,
+        "days": new_days,
+        "price_inr": new_price,
+        "active": new_active,
+        "updated_at": now.isoformat(),
+        "first_renewal_only": pk == "launch90",
     }
 
 

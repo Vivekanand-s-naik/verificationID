@@ -46,9 +46,13 @@ class FakePostgresDB:
         self.sessions: dict[str, dict] = {}
         self.admin_users: list[dict] = []
         self.audit_log: list[dict] = []
+        self.subscription_plans: dict[str, dict] = {}
+        self.broadcast_messages: list[dict] = []
+        self.broadcast_acks: set[tuple[int, str]] = set()
         self._next_sub_id = 1
         self._next_admin_id = 1
         self._next_audit_id = 1
+        self._next_broadcast_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -358,6 +362,120 @@ class _FakeCursor:
             if sess and sess.get("revoked_at") is None:
                 sess["revoked_at"] = revoked_at
                 self.rowcount = 1
+            return
+
+        if norm == "SELECT COUNT(*) AS cnt FROM subscription_plans":
+            self._rows = [{"cnt": len(self.db.subscription_plans)}]
+            return
+
+        if norm.startswith("INSERT INTO subscription_plans"):
+            pk, label, days, price_inr, active, sort_order, updated_at = params
+            if pk not in self.db.subscription_plans:
+                self.db.subscription_plans[pk] = {
+                    "plan_key": pk,
+                    "label": label,
+                    "days": int(days),
+                    "price_inr": int(price_inr),
+                    "active": bool(active),
+                    "sort_order": int(sort_order),
+                    "updated_at": updated_at,
+                }
+                self.rowcount = 1
+            return
+
+        if "FROM subscription_plans WHERE active = TRUE ORDER BY" in norm:
+            rows = [dict(p) for p in self.db.subscription_plans.values() if p.get("active", True)]
+            rows.sort(key=lambda p: (int(p.get("sort_order", 100)), p["plan_key"]))
+            self._rows = rows
+            return
+
+        if "FROM subscription_plans ORDER BY" in norm:
+            rows = [dict(p) for p in self.db.subscription_plans.values()]
+            rows.sort(key=lambda p: (int(p.get("sort_order", 100)), p["plan_key"]))
+            self._rows = rows
+            return
+
+        if "FROM subscription_plans WHERE plan_key = %s" in norm:
+            p = self.db.subscription_plans.get(params[0])
+            self._rows = [dict(p)] if p else []
+            return
+
+        if norm.startswith("UPDATE subscription_plans SET label = %s"):
+            new_label, new_days, new_price, new_active, upd_at, pk = params
+            if pk in self.db.subscription_plans:
+                self.db.subscription_plans[pk].update(
+                    label=new_label,
+                    days=int(new_days),
+                    price_inr=int(new_price),
+                    active=bool(new_active),
+                    updated_at=upd_at,
+                )
+                self.rowcount = 1
+            return
+
+        if "FROM broadcast_messages b LEFT JOIN broadcast_acknowledgments a ON a.broadcast_id = b.id AND a.device_id = %s" in norm:
+            dev_id = params[0]
+            rows = [
+                dict(b)
+                for b in self.db.broadcast_messages
+                if b.get("active", False) and (b["id"], dev_id) not in self.db.broadcast_acks
+            ]
+            rows.sort(key=lambda b: (b["created_at"], b["id"]))
+            self._rows = rows
+            return
+
+        if "FROM broadcast_messages b LEFT JOIN broadcast_acknowledgments a ON a.broadcast_id = b.id GROUP BY b.id" in norm:
+            rows = []
+            for b in self.db.broadcast_messages:
+                r = dict(b)
+                r["ack_count"] = sum(1 for (bid, _d) in self.db.broadcast_acks if bid == b["id"])
+                rows.append(r)
+            rows.sort(key=lambda b: (b["created_at"], b["id"]), reverse=True)
+            self._rows = rows
+            return
+
+        if norm.startswith("INSERT INTO broadcast_messages"):
+            msg, tone, created_at, created_by = params
+            row = {
+                "id": self.db._next_broadcast_id,
+                "message": msg,
+                "tone": tone,
+                "created_at": created_at,
+                "active": True,
+                "created_by": created_by,
+            }
+            self.db._next_broadcast_id += 1
+            self.db.broadcast_messages.append(row)
+            self._rows = [dict(row)]
+            self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE broadcast_messages SET active = FALSE WHERE id = %s"):
+            bid = int(params[0])
+            for b in self.db.broadcast_messages:
+                if b["id"] == bid:
+                    b["active"] = False
+                    self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE broadcast_messages SET active = TRUE WHERE id = %s"):
+            bid = int(params[0])
+            for b in self.db.broadcast_messages:
+                if b["id"] == bid:
+                    b["active"] = True
+                    self.rowcount = 1
+            return
+
+        if "SELECT id FROM broadcast_messages WHERE id = %s" in norm:
+            bid = int(params[0])
+            m = next((b for b in self.db.broadcast_messages if b["id"] == bid), None)
+            self._rows = [{"id": m["id"]}] if m else []
+            return
+
+        if norm.startswith("INSERT INTO broadcast_acknowledgments"):
+            bid, dev_id, _acked_at = params
+            self.db.broadcast_acks.add((int(bid), str(dev_id)))
+            self.rowcount = 1
             return
 
         raise AssertionError(f"Unhandled SQL in test fake: {norm}")
@@ -1242,3 +1360,167 @@ def test_dashboard_uses_flat_enterprise_styling_without_gradients_or_glows(env_c
     for body in (login_html_r.text, dash_html_r.text):
         for pattern in disallowed_styles:
             assert pattern not in body, f"Disallowed template style found: {pattern}"
+
+
+def test_broadcast_notifications_owner_only_ack_and_deactivate(env_client):
+    client, db = env_client
+    headers_owner = {"X-Admin-Token": "test-admin-secret"}
+
+    # Create a non-owner admin user and verify broadcast management is strictly SystemOwner-only
+    now = datetime.now(timezone.utc)
+    db.admin_users.append(
+        {
+            "id": 99,
+            "username": "subadmin",
+            "password_hash": srv._hash_password("SubAdminPass!99"),
+            "email": "sub@example.com",
+            "role": "admin",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    sub_login = client.post("/api/v1/admin/login", json={"username": "subadmin", "password": "SubAdminPass!99"})
+    assert sub_login.status_code == 200
+    sub_hdrs = {"Authorization": f"Bearer {sub_login.json()['token']}"}
+    assert client.post("/api/v1/admin/broadcasts", json={"message": "Blocked"}, headers=sub_hdrs).status_code == 403
+    client.cookies.clear()
+
+    # Log in as SystemOwner (owner) and create broadcast #1
+    owner_login = client.post("/api/v1/admin/login", json={"username": "test-admin-user", "password": "test-admin-password"})
+    assert owner_login.status_code == 200
+    b1 = client.post(
+        "/api/v1/admin/broadcasts",
+        json={"message": "Scheduled maintenance tonight at 11 PM IST", "tone": "notice"},
+        headers=headers_owner,
+    )
+    assert b1.status_code == 200
+    b1_id = b1.json()["id"]
+
+    # Device A and Device B both receive broadcast #1 on /api/v1/validate
+    v_a1 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-A", "app_version": "1.0.0"},
+    )
+    assert v_a1.status_code == 200
+    assert [b["id"] for b in v_a1.json()["broadcasts"]] == [b1_id]
+
+    # Device A acknowledges broadcast #1 -> no longer returned to Device A, still returned to Device B
+    ack_a = client.post(
+        f"/api/v1/broadcasts/{b1_id}/ack",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-A"},
+    )
+    assert ack_a.status_code == 200
+
+    v_a2 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-A", "app_version": "1.0.0"},
+    )
+    assert v_a2.json()["broadcasts"] == []
+
+    v_b1 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-B", "app_version": "1.0.0"},
+    )
+    assert [b["id"] for b in v_b1.json()["broadcasts"]] == [b1_id]
+
+    # Owner sends broadcast #2 -> Device A receives ONLY #2
+    b2 = client.post(
+        "/api/v1/admin/broadcasts",
+        json={"message": "Price update effective next renewal", "tone": "warning"},
+        headers=headers_owner,
+    )
+    b2_id = b2.json()["id"]
+    v_a3 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-A", "app_version": "1.0.0"},
+    )
+    assert [b["id"] for b in v_a3.json()["broadcasts"]] == [b2_id]
+
+    # Owner deactivates #2 -> stops being sent to devices that haven't seen it
+    deact = client.post(f"/api/v1/admin/broadcasts/{b2_id}/deactivate", headers=headers_owner)
+    assert deact.status_code == 200 and deact.json()["active"] is False
+    v_c = client.post(
+        "/api/v1/validate",
+        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-C", "app_version": "1.0.0"},
+    )
+    assert [b["id"] for b in v_c.json()["broadcasts"]] == [b1_id]
+
+    # Dashboard list shows ack_count accurately
+    all_b = client.get("/api/v1/admin/broadcasts", headers=headers_owner).json()
+    b1_row = next(x for x in all_b if x["id"] == b1_id)
+    b2_row = next(x for x in all_b if x["id"] == b2_id)
+    assert b1_row["ack_count"] == 1 and b1_row["active"] is True
+    assert b2_row["active"] is False
+
+
+def test_live_editable_subscription_plans_and_launch90_eligibility(env_client):
+    client, db = env_client
+    headers_owner = {"X-Admin-Token": "test-admin-secret"}
+
+    # Initial plans seeded from DEFAULT_PLANS (Quarterly = ₹300)
+    p0 = client.get("/api/v1/plans?license_key=VIVEK-ANPR-0001")
+    assert p0.status_code == 200
+    assert p0.json()["plans"]["quarterly"]["price_inr"] == 300
+    assert p0.json()["is_first_paid_renewal"] is True
+    assert "launch90" in p0.json()["plans"]
+
+    # Non-owner admin cannot edit plans
+    now = datetime.now(timezone.utc)
+    db.admin_users.append(
+        {
+            "id": 98,
+            "username": "staffadmin",
+            "password_hash": srv._hash_password("StaffPass!98"),
+            "email": "staff@example.com",
+            "role": "admin",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    st_login = client.post("/api/v1/admin/login", json={"username": "staffadmin", "password": "StaffPass!98"})
+    st_hdrs = {"Authorization": f"Bearer {st_login.json()['token']}"}
+    assert client.put("/api/v1/admin/plans/quarterly", json={"price_inr": 450}, headers=st_hdrs).status_code == 403
+    client.cookies.clear()
+
+    # Log in as SystemOwner and edit Quarterly price live: ₹300 -> ₹375 + updated label
+    owner_login = client.post("/api/v1/admin/login", json={"username": "test-admin-user", "password": "test-admin-password"})
+    assert owner_login.status_code == 200
+    upd = client.put(
+        "/api/v1/admin/plans/quarterly",
+        json={"label": "Quarterly Pro", "price_inr": 375},
+        headers=headers_owner,
+    )
+    assert upd.status_code == 200
+    assert upd.json()["price_inr"] == 375
+    assert upd.json()["label"] == "Quarterly Pro"
+
+    # Public /api/v1/plans reflects the change immediately
+    p1 = client.get("/api/v1/plans?license_key=VIVEK-ANPR-0001").json()
+    assert p1["plans"]["quarterly"]["price_inr"] == 375
+    assert p1["plans"]["quarterly"]["label"] == "Quarterly Pro"
+
+    # Owner adds a new plan ('semiannual', 180d, ₹550) & renews using it
+    add = client.post(
+        "/api/v1/admin/plans",
+        json={"plan_key": "semiannual", "label": "Half-Yearly", "days": 180, "price_inr": 550, "active": True},
+        headers=headers_owner,
+    )
+    assert add.status_code == 200
+    p2 = client.get("/api/v1/plans?license_key=VIVEK-ANPR-0001").json()
+    assert p2["plans"]["semiannual"] == {"days": 180, "price_inr": 550, "label": "Half-Yearly"}
+
+    ren = client.post("/api/v1/admin/renew?license_key=VIVEK-ANPR-0001&plan=semiannual", headers=headers_owner)
+    assert ren.status_code == 200 and ren.json()["days_added"] == 180
+
+    # After paid renewal, launch90 first-renewal eligibility becomes False
+    p3 = client.get("/api/v1/plans?license_key=VIVEK-ANPR-0001").json()
+    assert p3["is_first_paid_renewal"] is False
+
+    # Owner deactivates 'monthly' -> hidden from /api/v1/plans, still preserved in /api/v1/admin/plans
+    deact = client.put("/api/v1/admin/plans/monthly", json={"active": False}, headers=headers_owner)
+    assert deact.status_code == 200 and deact.json()["active"] is False
+    p4 = client.get("/api/v1/plans").json()
+    assert "monthly" not in p4["plans"]
+    admin_plans = client.get("/api/v1/admin/plans", headers=headers_owner).json()
+    monthly_row = next(x for x in admin_plans if x["plan_key"] == "monthly")
+    assert monthly_row["active"] is False and monthly_row["price_inr"] == 150

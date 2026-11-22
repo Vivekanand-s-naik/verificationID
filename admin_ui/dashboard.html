@@ -62,7 +62,8 @@
 
     button,
     select,
-    input {
+    input,
+    textarea {
       font-family: inherit;
     }
 
@@ -808,6 +809,8 @@
     }
 
     .field input,
+    .field textarea,
+    .field select,
     .search-input,
     .plan-select {
       width: 100%;
@@ -821,11 +824,72 @@
       transition: border-color 0.12s ease;
     }
 
+    .field textarea {
+      min-height: 86px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
     .field input:focus,
+    .field textarea:focus,
+    .field select:focus,
     .search-input:focus,
     .plan-select:focus {
       outline: none;
       border-color: var(--text);
+    }
+
+    .broadcast-item {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px 14px;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .broadcast-item:first-child {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    .broadcast-msg {
+      margin: 6px 0 4px;
+      font-size: 0.88rem;
+      color: var(--text);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .plan-edit-input {
+      width: 100%;
+      min-height: 32px;
+      padding: 4px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      font-size: 0.82rem;
+      background: var(--surface);
+      color: var(--text);
+    }
+
+    .plan-edit-num {
+      width: 96px;
+      min-width: 78px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .plan-form-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    @media (min-width: 780px) {
+      .plan-form-grid {
+        grid-template-columns: 1fr 1.6fr 0.7fr 0.8fr auto;
+        align-items: end;
+      }
     }
 
     .plan-select {
@@ -1301,6 +1365,12 @@
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
         History <span id="history-count" class="count-pill">0</span>
       </button>
+      <button type="button" id="tab-announcements-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="announcements">
+        Announcements <span id="announcements-count" class="count-pill">0</span>
+      </button>
+      <button type="button" id="tab-plans-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="plans">
+        Plans &amp; Pricing
+      </button>
       <button type="button" id="tab-account-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="account">
         Manage Admin Account
       </button>
@@ -1372,7 +1442,93 @@
       <div id="history-list"></div>
     </section>
 
-    <!-- TAB 5: MANAGE ADMIN ACCOUNT (SYSTEM OWNER ONLY) -->
+    <!-- TAB 5: ANNOUNCEMENTS / BROADCASTS (SYSTEM OWNER ONLY) -->
+    <section id="panel-announcements" class="panel" role="tabpanel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Send Client Broadcast Notification</h2>
+            <p class="card-subtitle">Push a dismissible notice to client apps on their next license validation check. Each device sees it once until dismissed.</p>
+          </div>
+          <span class="badge badge-owner">System Owner</span>
+        </div>
+        <form id="create-broadcast-form" class="account-form-grid">
+          <div class="field">
+            <label for="broadcast-message">Announcement Message</label>
+            <textarea id="broadcast-message" placeholder="e.g. Scheduled server maintenance tonight at 11:00 PM IST, or price update effective next renewal..." maxlength="2000" required></textarea>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:10px;">
+            <div class="field" style="min-width:210px; margin:0;">
+              <label for="broadcast-tone">Accent Tone</label>
+              <select id="broadcast-tone">
+                <option value="notice">Notice (Orange Accent)</option>
+                <option value="info">Info (Neutral Accent)</option>
+                <option value="warning">Important Warning (Orange Accent)</option>
+              </select>
+            </div>
+            <button type="submit" id="send-broadcast-btn" class="btn btn-primary">Send Broadcast</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Broadcast History &amp; Delivery Status</h2>
+            <p class="card-subtitle">Deactivate any active broadcast to stop delivering it to devices that have not seen it yet.</p>
+          </div>
+        </div>
+        <div id="broadcasts-list">
+          <div class="empty-state">No broadcast messages sent yet.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: LIVE SUBSCRIPTION PLANS & PRICING (SYSTEM OWNER ONLY) -->
+    <section id="panel-plans" class="panel" role="tabpanel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Live Subscription Plans &amp; Pricing</h2>
+            <p class="card-subtitle">Edit prices, labels, or durations live — changes immediately reflect in the client app's renewal dialog &amp; UPI QR code without redeploying. Deactivating hides a plan without deleting historical records.</p>
+          </div>
+          <span class="badge badge-owner">System Owner</span>
+        </div>
+        <div id="plans-table-container">
+          <div class="empty-state">Loading subscription plans...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Add New Subscription Plan</h2>
+            <p class="card-subtitle">Create an additional plan tier immediately available to client apps.</p>
+          </div>
+        </div>
+        <form id="create-plan-form" class="plan-form-grid">
+          <div class="field">
+            <label for="new-plan-key">Plan Key</label>
+            <input id="new-plan-key" type="text" placeholder="e.g. semiannual" required />
+          </div>
+          <div class="field">
+            <label for="new-plan-label">Display Label</label>
+            <input id="new-plan-label" type="text" placeholder="e.g. Half-Yearly (6 Months)" required />
+          </div>
+          <div class="field">
+            <label for="new-plan-days">Days</label>
+            <input id="new-plan-days" type="number" min="1" max="3650" value="180" required />
+          </div>
+          <div class="field">
+            <label for="new-plan-price">Price (₹)</label>
+            <input id="new-plan-price" type="number" min="1" max="1000000" value="550" required />
+          </div>
+          <button type="submit" id="create-plan-btn" class="btn btn-primary">Add Plan</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- TAB 7: MANAGE ADMIN ACCOUNT (SYSTEM OWNER ONLY) -->
     <section id="panel-account" class="panel" role="tabpanel">
       <div class="account-layout">
         <div class="card">
@@ -1506,6 +1662,8 @@
         licenses: [],
         history: [],
         auditLog: [],
+        broadcasts: [],
+        adminPlans: [],
         summary: null,
         accountData: null,
         licenseSearch: "",
@@ -1615,7 +1773,7 @@
       }
 
       function setActiveTab(tabName) {
-        if (tabName === "account" && !(state.session && state.session.is_owner)) {
+        if ((tabName === "account" || tabName === "announcements" || tabName === "plans") && !(state.session && state.session.is_owner)) {
           return;
         }
         state.activeTab = tabName;
@@ -1629,6 +1787,10 @@
         });
         if (tabName === "account" && !state.accountData) {
           loadAccountData().catch(function () { });
+        } else if (tabName === "announcements") {
+          loadBroadcasts().catch(function () { });
+        } else if (tabName === "plans") {
+          loadAdminPlans().catch(function () { });
         }
       }
 
@@ -2170,6 +2332,119 @@
         renderSummary();
       }
 
+      function renderBroadcasts() {
+        const list = state.broadcasts || [];
+        const activeCount = list.filter(function (b) { return Boolean(b.active); }).length;
+        const pill = document.getElementById("announcements-count");
+        if (pill) {
+          pill.textContent = String(activeCount);
+          pill.classList.toggle("has-alert", activeCount > 0);
+        }
+        const root = document.getElementById("broadcasts-list");
+        if (!root) return;
+        if (!list.length) {
+          root.innerHTML = '<div class="empty-state">No broadcast messages sent yet.</div>';
+          return;
+        }
+        root.innerHTML = list.map(function (b) {
+          const isActive = Boolean(b.active);
+          const badgeCls = isActive ? "badge-active" : "badge-admin";
+          const badgeTxt = isActive ? "Active" : "Inactive";
+          const toneLabel = (b.tone || "notice").toUpperCase();
+          const ackCount = Number(b.ack_count || 0);
+          return (
+            '<div class="broadcast-item" data-broadcast-id="' + escapeHtml(b.id) + '">' +
+            '<div style="flex:1 1 280px; min-width:0;">' +
+            '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:7px;">' +
+            '<span class="badge ' + badgeCls + '">' + escapeHtml(badgeTxt) + '</span>' +
+            '<span class="badge badge-pending">' + escapeHtml(toneLabel) + '</span>' +
+            '<span class="mono" style="color:var(--text-muted);">#' + escapeHtml(b.id) + '</span>' +
+            '<span style="font-size:0.78rem; color:var(--text-muted);">by ' + escapeHtml(b.created_by || "owner") + ' · ' + escapeHtml(formatDate(b.created_at)) + '</span>' +
+            '</div>' +
+            '<div class="broadcast-msg">' + escapeHtml(b.message) + '</div>' +
+            '<div style="font-size:0.77rem; color:var(--text-muted);">Acknowledged by <strong class="tabular">' + escapeHtml(ackCount) + '</strong> ' + (ackCount === 1 ? "device" : "devices") + '</div>' +
+            '</div>' +
+            '<div class="row-actions">' +
+            (isActive
+              ? '<button type="button" class="btn btn-danger-outline btn-sm" data-bcast-action="deactivate">Deactivate</button>'
+              : '<button type="button" class="btn btn-sm" data-bcast-action="activate">Reactivate</button>') +
+            '</div>' +
+            '</div>'
+          );
+        }).join("");
+      }
+
+      async function loadBroadcasts() {
+        if (!(state.session && state.session.is_owner)) return;
+        state.broadcasts = await apiFetch("/api/v1/admin/broadcasts");
+        renderBroadcasts();
+      }
+
+      function renderAdminPlans() {
+        const root = document.getElementById("plans-table-container");
+        if (!root) return;
+        const plans = state.adminPlans || [];
+        if (!plans.length) {
+          root.innerHTML = '<div class="empty-state">No subscription plans configured.</div>';
+          return;
+        }
+        const rowsHtml = plans.map(function (p) {
+          const isActive = Boolean(p.active);
+          const badgeCls = isActive ? "badge-active" : "badge-admin";
+          const badgeTxt = isActive ? "Active" : "Inactive";
+          const launchNote = p.first_renewal_only
+            ? '<div><span class="badge badge-owner" style="margin-top:4px;">First Renewal Only</span></div>'
+            : "";
+          return (
+            '<tr data-plan-key="' + escapeHtml(p.plan_key) + '">' +
+            '<td data-label="Plan Key"><strong class="mono">' + escapeHtml(p.plan_key) + '</strong>' + launchNote + '</td>' +
+            '<td data-label="Label"><input type="text" class="plan-edit-input" data-plan-field="label" value="' + escapeHtml(p.label) + '" /></td>' +
+            '<td data-label="Days"><input type="number" min="1" max="3650" class="plan-edit-input plan-edit-num" data-plan-field="days" value="' + escapeHtml(p.days) + '" /></td>' +
+            '<td data-label="Price (₹)"><input type="number" min="1" max="1000000" class="plan-edit-input plan-edit-num" data-plan-field="price_inr" value="' + escapeHtml(p.price_inr) + '" /></td>' +
+            '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(badgeTxt) + '</span></td>' +
+            '<td data-label="Actions">' +
+            '<div class="row-actions">' +
+            '<button type="button" class="btn btn-primary btn-sm" data-plan-action="save">Save</button>' +
+            (isActive
+              ? '<button type="button" class="btn btn-danger-outline btn-sm" data-plan-action="deactivate">Deactivate</button>'
+              : '<button type="button" class="btn btn-success btn-sm" data-plan-action="activate">Activate</button>') +
+            '</div>' +
+            '</td>' +
+            '</tr>'
+          );
+        }).join("");
+
+        root.innerHTML =
+          '<div class="table-wrap">' +
+          '<table class="ops-table">' +
+          '<thead><tr>' +
+          '<th>Plan Key</th>' +
+          '<th>Display Label</th>' +
+          '<th>Days</th>' +
+          '<th>Price (₹)</th>' +
+          '<th>Status</th>' +
+          '<th>Actions</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+          '</table>' +
+          '</div>';
+      }
+
+      async function loadAdminPlans() {
+        if (!(state.session && state.session.is_owner)) return;
+        state.adminPlans = await apiFetch("/api/v1/admin/plans");
+        // Keep active plans map synced for Licenses dropdowns immediately
+        const activeMap = {};
+        state.adminPlans.forEach(function (p) {
+          if (p.active) {
+            activeMap[p.plan_key] = { days: p.days, price_inr: p.price_inr, label: p.label };
+          }
+        });
+        state.plans = activeMap;
+        renderAdminPlans();
+        renderLicenses();
+      }
+
       async function loadAccountData() {
         if (!(state.session && state.session.is_owner)) return;
         state.accountData = await apiFetch("/api/v1/admin/account");
@@ -2190,10 +2465,10 @@
           "Signed in as " + (session.username || "admin") +
           (session.expires_at ? " · Session expires " + formatDate(session.expires_at) : "");
 
-        const acctTabBtn = document.getElementById("tab-account-btn");
-        if (acctTabBtn) {
-          acctTabBtn.classList.toggle("hidden", !isOwner);
-        }
+        ["tab-account-btn", "tab-announcements-btn", "tab-plans-btn"].forEach(function (id) {
+          const el = document.getElementById(id);
+          if (el) el.classList.toggle("hidden", !isOwner);
+        });
       }
 
       async function loadAllData() {
@@ -2202,7 +2477,7 @@
 
         const jobs = [loadPending(), loadLicenses(), loadHistory(), loadAuditLog(), loadSummary()];
         if (session.is_owner) {
-          jobs.push(loadAccountData());
+          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans());
         }
         await Promise.all(jobs);
       }
@@ -2344,6 +2619,135 @@
         } finally {
           saveBtn.disabled = false;
           saveBtn.textContent = "Save Account Changes";
+        }
+      });
+
+      document.getElementById("create-broadcast-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const msgEl = document.getElementById("broadcast-message");
+        const toneEl = document.getElementById("broadcast-tone");
+        const btn = document.getElementById("send-broadcast-btn");
+        const msg = (msgEl.value || "").trim();
+        if (!msg) {
+          showToast("Enter a broadcast message first.", "error");
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Sending...";
+        try {
+          await apiFetch("/api/v1/admin/broadcasts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: msg, tone: toneEl.value || "notice" }),
+          });
+          msgEl.value = "";
+          await loadBroadcasts();
+          showToast("Broadcast published to active client devices.", "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Send Broadcast";
+        }
+      });
+
+      document.getElementById("broadcasts-list").addEventListener("click", async function (evt) {
+        const btn = evt.target.closest("button[data-bcast-action]");
+        if (!btn) return;
+        const item = btn.closest("[data-broadcast-id]");
+        const id = Number(item && item.dataset.broadcastId);
+        const action = btn.dataset.bcastAction;
+        if (!id || (action !== "deactivate" && action !== "activate")) return;
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/v1/admin/broadcasts/" + encodeURIComponent(id) + "/" + action, { method: "POST" });
+          await loadBroadcasts();
+          showToast("Broadcast #" + id + (action === "deactivate" ? " deactivated." : " reactivated."), "success");
+        } catch (err) {
+          btn.disabled = false;
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        }
+      });
+
+      document.getElementById("plans-table-container").addEventListener("click", async function (evt) {
+        const btn = evt.target.closest("button[data-plan-action]");
+        if (!btn) return;
+        const row = btn.closest("tr[data-plan-key]");
+        const planKey = row && row.dataset.planKey;
+        const action = btn.dataset.planAction;
+        if (!planKey) return;
+
+        const labelIn = row.querySelector("[data-plan-field='label']");
+        const daysIn = row.querySelector("[data-plan-field='days']");
+        const priceIn = row.querySelector("[data-plan-field='price_inr']");
+
+        let payload = {};
+        if (action === "save") {
+          payload = {
+            label: (labelIn.value || "").trim(),
+            days: Number(daysIn.value),
+            price_inr: Number(priceIn.value),
+          };
+        } else if (action === "deactivate") {
+          if (!window.confirm("Deactivate plan '" + planKey + "'? It will be hidden from client renewal dialogs while preserving historical records.")) {
+            return;
+          }
+          payload = { active: false };
+        } else if (action === "activate") {
+          payload = { active: true };
+        } else {
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/v1/admin/plans/" + encodeURIComponent(planKey), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          await Promise.all([loadAdminPlans(), loadAuditLog()]);
+          showToast("Updated plan '" + planKey + "' live.", "success");
+        } catch (err) {
+          btn.disabled = false;
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        }
+      });
+
+      document.getElementById("create-plan-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const keyIn = document.getElementById("new-plan-key");
+        const labelIn = document.getElementById("new-plan-label");
+        const daysIn = document.getElementById("new-plan-days");
+        const priceIn = document.getElementById("new-plan-price");
+        const btn = document.getElementById("create-plan-btn");
+
+        const payload = {
+          plan_key: (keyIn.value || "").trim().toLowerCase(),
+          label: (labelIn.value || "").trim(),
+          days: Number(daysIn.value),
+          price_inr: Number(priceIn.value),
+          active: true,
+        };
+        if (!payload.plan_key || !payload.label) {
+          showToast("Plan key and display label are required.", "error");
+          return;
+        }
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/v1/admin/plans", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          keyIn.value = "";
+          labelIn.value = "";
+          await Promise.all([loadAdminPlans(), loadAuditLog()]);
+          showToast("Added live plan '" + payload.plan_key + "' (₹" + payload.price_inr + ").", "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
         }
       });
 
