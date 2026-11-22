@@ -179,12 +179,6 @@ def init_db():
             _seed_initial_owner_user(cur)
 
 
-if os.environ.get("SKIP_INIT_DB_ON_IMPORT") != "1":
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL environment variable is not set.")
-    init_db()
-
-
 @app.middleware("http")
 async def add_admin_security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -1619,3 +1613,9 @@ def admin_dashboard_summary(
 @app.get("/", include_in_schema=False)
 def root_redirect():
     return RedirectResponse(url="/admin", status_code=302)
+
+
+if os.environ.get("SKIP_INIT_DB_ON_IMPORT") != "1":
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not set.")
+    init_db()

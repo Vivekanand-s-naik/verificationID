@@ -5,12 +5,16 @@ expired vs revoked precedence, base64 Postgres screenshot upload, 10-minute rate
 Telegram sendPhoto dispatch, and admin approve/reject atomic workflows.
 """
 import base64
+import importlib.util
 import os
 import re
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1011,3 +1015,45 @@ def test_system_owner_admin_users_seeding_env_independence_and_credential_update
         "/api/v1/admin/account",
         json={"current_password": "SecondaryPass!42", "username": "hijack"},
     ).status_code == 403
+
+
+def test_import_time_init_db_runs_without_name_error(monkeypatch):
+    """Importing license_server without SKIP_INIT_DB_ON_IMPORT runs init_db() + owner seeding cleanly."""
+    db = FakePostgresDB()
+
+    class _ImportFakeConn:
+        def __init__(self):
+            self.cursor_factory = None
+
+        def cursor(self):
+            return _FakeCursor(db)
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.delenv("SKIP_INIT_DB_ON_IMPORT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://mock/test")
+    monkeypatch.setenv("ADMIN_USERNAME", "test-admin-user")
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-password")
+    monkeypatch.setattr(psycopg2, "connect", lambda *args, **kwargs: _ImportFakeConn())
+
+    mod_name = "license_server_import_test"
+    spec = importlib.util.spec_from_file_location(mod_name, Path(srv.__file__))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(mod_name, None)
+
+    assert len(db.admin_users) == 1
+    assert db.admin_users[0]["username"] == "test-admin-user"
+    assert db.admin_users[0]["role"] == "owner"
+    assert db.admin_users[0]["password_hash"].startswith("$2b$")
