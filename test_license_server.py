@@ -39,7 +39,9 @@ class FakePostgresDB:
         self.licenses: dict[str, dict] = {}
         self.submissions: list[dict] = []
         self.sessions: dict[str, dict] = {}
+        self.admin_users: list[dict] = []
         self._next_sub_id = 1
+        self._next_admin_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -74,7 +76,7 @@ class _FakeCursor:
         self._rows = []
         self.rowcount = 0
 
-        if norm.startswith(("CREATE TABLE", "ALTER TABLE", "CREATE INDEX")):
+        if norm.startswith(("CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX")):
             return
 
         if norm == "UPDATE licenses SET plan = 'trial' WHERE plan IS NULL":
@@ -205,6 +207,62 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
+        if norm == "SELECT COUNT(*) AS cnt FROM admin_users":
+            self._rows = [{"cnt": len(self.db.admin_users)}]
+            return
+
+        if norm.startswith("INSERT INTO admin_users"):
+            username, pw_hash, email, created_at, updated_at = params
+            row = {
+                "id": self.db._next_admin_id,
+                "username": username,
+                "password_hash": pw_hash,
+                "email": email,
+                "role": "owner",
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+            self.db._next_admin_id += 1
+            self.db.admin_users.append(row)
+            self.rowcount = 1
+            return
+
+        if "FROM admin_users WHERE LOWER(username) = LOWER(%s) AND id != %s" in norm:
+            uname, exclude_id = params
+            match = next(
+                (u for u in self.db.admin_users if u["username"].lower() == str(uname).lower() and u["id"] != int(exclude_id)),
+                None,
+            )
+            self._rows = [dict(match)] if match else []
+            return
+
+        if "FROM admin_users WHERE LOWER(username) = LOWER(%s)" in norm:
+            uname = params[0]
+            match = next((u for u in self.db.admin_users if u["username"].lower() == str(uname).lower()), None)
+            self._rows = [dict(match)] if match else []
+            return
+
+        if "FROM admin_users WHERE id = %s" in norm:
+            uid = int(params[0])
+            match = next((u for u in self.db.admin_users if u["id"] == uid), None)
+            self._rows = [dict(match)] if match else []
+            return
+
+        if "FROM admin_users ORDER BY id ASC" in norm:
+            self._rows = [dict(u) for u in sorted(self.db.admin_users, key=lambda x: x["id"])]
+            return
+
+        if norm.startswith("UPDATE admin_users SET username = %s"):
+            new_u, new_e, new_h, upd_at, uid = params
+            match = next((u for u in self.db.admin_users if u["id"] == int(uid)), None)
+            if match:
+                match["username"] = new_u
+                match["email"] = new_e
+                match["password_hash"] = new_h
+                match["updated_at"] = upd_at
+                self.rowcount = 1
+            return
+
         if norm.startswith("DELETE FROM admin_sessions WHERE expires_at < %s"):
             cutoff = params[0]
             to_del = [jti for jti, s in self.db.sessions.items() if s["expires_at"] < cutoff]
@@ -214,10 +272,16 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO admin_sessions"):
-            jti, username, created_at, expires_at = params
+            if len(params) == 6:
+                jti, user_id, username, role, created_at, expires_at = params
+            else:
+                jti, username, created_at, expires_at = params
+                user_id, role = None, "owner"
             self.db.sessions[jti] = {
                 "jti": jti,
+                "user_id": user_id,
                 "username": username,
+                "role": role,
                 "created_at": created_at,
                 "expires_at": expires_at,
                 "revoked_at": None,
@@ -228,6 +292,16 @@ class _FakeCursor:
         if "FROM admin_sessions WHERE jti = %s" in norm:
             sess = self.db.sessions.get(params[0])
             self._rows = [dict(sess)] if sess else []
+            return
+
+        if norm.startswith("UPDATE admin_sessions SET revoked_at = %s WHERE user_id = %s"):
+            revoked_at, uid = params
+            count = 0
+            for sess in self.db.sessions.values():
+                if sess.get("user_id") == int(uid) and sess.get("revoked_at") is None:
+                    sess["revoked_at"] = revoked_at
+                    count += 1
+            self.rowcount = count
             return
 
         if norm.startswith("UPDATE admin_sessions SET revoked_at = %s WHERE jti = %s"):
@@ -634,9 +708,12 @@ def test_admin_session_expiration_and_logout_invalidation(env_client, monkeypatc
 
 
 def test_admin_login_missing_env_fails_closed_and_rate_limit(env_client, monkeypatch):
-    client, _ = env_client
+    client, db = env_client
 
-    # Missing ADMIN_PASSWORD -> 503
+    # Clear seeded admin_users to simulate fresh unconfigured deployment
+    db.admin_users.clear()
+
+    # Missing ADMIN_PASSWORD with empty admin_users -> 503
     monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     r_no_pw = client.post(
         "/api/v1/admin/login",
@@ -644,7 +721,7 @@ def test_admin_login_missing_env_fails_closed_and_rate_limit(env_client, monkeyp
     )
     assert r_no_pw.status_code == 503
 
-    # Missing ADMIN_USERNAME -> 503
+    # Missing ADMIN_USERNAME with empty admin_users -> 503
     monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-password")
     monkeypatch.delenv("ADMIN_USERNAME", raising=False)
     r_no_user = client.post(
@@ -789,3 +866,148 @@ def test_admin_summary_states_revenue_and_dashboard_html(env_client):
     issue_types = {i["type"] for i in s4["issues"]}
     assert {"revoked", "expiring_soon"}.issubset(issue_types)
     assert [a["license_key"] for a in s4["active_licenses"]] == ["VIVEK-ANPR-0001"]
+
+
+def test_system_owner_admin_users_seeding_env_independence_and_credential_update(env_client, monkeypatch):
+    """
+    Verify SystemOwner tier backed by Postgres admin_users:
+      1. Seeded once from ADMIN_USERNAME/ADMIN_PASSWORD with bcrypt hash & role='owner'
+      2. Removing ADMIN_USERNAME/ADMIN_PASSWORD env vars still lets DB owner sign in
+      3. Non-owner 'admin' account cannot access /api/v1/admin/account (403)
+      4. Owner can update username, email, and password with current-password confirmation
+      5. Wrong current password is rejected (403); old credentials rejected (401) after change
+      6. Re-running init_db() preserves updated owner credentials (never re-seeds)
+      7. New username + new password logs in cleanly and dashboard serves Manage Admin Account
+    """
+    client, db = env_client
+
+    # 1. Verify initial seed created bcrypt-hashed owner row (never plaintext)
+    assert len(db.admin_users) == 1
+    seeded = db.admin_users[0]
+    assert seeded["username"] == "test-admin-user"
+    assert seeded["role"] == "owner"
+    assert seeded["password_hash"].startswith("$2b$")
+    assert seeded["password_hash"] != "test-admin-password"
+
+    # 2. Remove ADMIN_USERNAME / ADMIN_PASSWORD from env -> DB-backed login still works!
+    monkeypatch.delenv("ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+
+    login1 = client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
+    )
+    assert login1.status_code == 200
+    body1 = login1.json()
+    assert body1["role"] == "owner"
+    old_token = body1["token"]
+
+    sess = client.get("/api/v1/admin/session").json()
+    assert sess["role"] == "owner"
+    assert sess["is_owner"] is True
+
+    # Dashboard HTML contains Manage Admin Account & account API endpoint
+    dash = client.get("/admin")
+    assert dash.status_code == 200
+    assert "Manage Admin Account" in dash.text
+    assert "/api/v1/admin/account" in dash.text
+
+    # 3. GET /api/v1/admin/account returns profile without password_hash
+    acct_r = client.get("/api/v1/admin/account")
+    assert acct_r.status_code == 200
+    acct_body = acct_r.json()
+    assert acct_body["account"]["username"] == "test-admin-user"
+    assert "password_hash" not in acct_body["account"]
+
+    # 4. Wrong current password rejected (403)
+    bad_upd = client.put(
+        "/api/v1/admin/account",
+        json={
+            "current_password": "wrong-current-password",
+            "username": "VivekanandOwner",
+            "email": "vivekanandnaik333@gmail.com",
+            "new_password": "BrandNewStrongPassword!99",
+        },
+    )
+    assert bad_upd.status_code == 403
+
+    # 5. Valid current password updates username, email, and password & rotates session
+    good_upd = client.put(
+        "/api/v1/admin/account",
+        json={
+            "current_password": "test-admin-password",
+            "username": "VivekanandOwner",
+            "email": "vivekanandnaik333@gmail.com",
+            "new_password": "BrandNewStrongPassword!99",
+        },
+    )
+    assert good_upd.status_code == 200
+    upd_json = good_upd.json()
+    assert upd_json["ok"] is True
+    assert set(upd_json["changed_fields"]) == {"username", "email", "password"}
+    assert upd_json["account"]["username"] == "VivekanandOwner"
+    assert upd_json["account"]["email"] == "vivekanandnaik333@gmail.com"
+    assert db.admin_users[0]["password_hash"].startswith("$2b$")
+    assert "BrandNewStrongPassword!99" not in db.admin_users[0]["password_hash"]
+
+    # Previous session token must be revoked after password change
+    assert TestClient(srv.app).get(
+        "/api/v1/admin/account", headers={"Authorization": f"Bearer {old_token}"}
+    ).status_code == 401
+
+    # Fresh session cookie/token returned by PUT works immediately
+    assert client.get("/api/v1/admin/session").json()["username"] == "VivekanandOwner"
+
+    # 6. Re-running init_db() even with old env vars restored must NOT overwrite updated owner!
+    monkeypatch.setenv("ADMIN_USERNAME", "test-admin-user")
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-password")
+    srv.init_db()
+    assert len(db.admin_users) == 1
+    assert db.admin_users[0]["username"] == "VivekanandOwner"
+
+    # 7. Old credentials rejected (401); new credentials log in cleanly (200)
+    fresh_client = TestClient(srv.app)
+    assert fresh_client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
+    ).status_code == 401
+    assert fresh_client.post(
+        "/api/v1/admin/login",
+        json={"username": "VivekanandOwner", "password": "test-admin-password"},
+    ).status_code == 401
+
+    new_login = fresh_client.post(
+        "/api/v1/admin/login",
+        json={"username": "VivekanandOwner", "password": "BrandNewStrongPassword!99"},
+    )
+    assert new_login.status_code == 200
+    assert new_login.json()["username"] == "VivekanandOwner"
+    assert new_login.json()["email"] == "vivekanandnaik333@gmail.com"
+    assert new_login.json()["role"] == "owner"
+
+    # 8. Non-owner 'admin' user can view dashboard/licenses but gets 403 on owner-only account endpoints
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": db._next_admin_id,
+        "username": "secondary-admin",
+        "password_hash": srv._hash_password("SecondaryPass!42"),
+        "email": "ops@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    db._next_admin_id += 1
+    sec_client = TestClient(srv.app)
+    sec_login = sec_client.post(
+        "/api/v1/admin/login",
+        json={"username": "secondary-admin", "password": "SecondaryPass!42"},
+    )
+    assert sec_login.status_code == 200
+    assert sec_login.json()["role"] == "admin"
+    assert sec_client.get("/api/v1/admin/session").json()["is_owner"] is False
+    assert sec_client.get("/api/v1/admin/list").status_code == 200
+    assert sec_client.get("/api/v1/admin/account").status_code == 403
+    assert sec_client.put(
+        "/api/v1/admin/account",
+        json={"current_password": "SecondaryPass!42", "username": "hijack"},
+    ).status_code == 403

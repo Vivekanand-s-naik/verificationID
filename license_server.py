@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import bcrypt
 import psycopg2
 import psycopg2.extras
 import requests
@@ -142,18 +143,40 @@ def init_db():
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    email TEXT,
+                    role TEXT NOT NULL DEFAULT 'admin',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_users_lower_username
+                ON admin_users (LOWER(username))
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS admin_sessions (
                     jti TEXT PRIMARY KEY,
+                    user_id INTEGER,
                     username TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'owner',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     expires_at TIMESTAMPTZ NOT NULL,
                     revoked_at TIMESTAMPTZ
                 )
             """)
+            cur.execute("ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER")
+            cur.execute("ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'owner'")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
                 ON admin_sessions (expires_at)
             """)
+
+            _seed_initial_owner_user(cur)
 
 
 if os.environ.get("SKIP_INIT_DB_ON_IMPORT") != "1":
@@ -188,12 +211,56 @@ def _check_admin(token: str | None):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
-def _get_admin_credentials() -> tuple[str | None, str | None]:
+def _hash_password(plain_password: str) -> str:
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(plain_password.encode("utf-8"), salt).decode("utf-8")
+
+
+def _verify_password(plain_password: str, password_hash: str | None) -> bool:
+    if not plain_password or not password_hash:
+        return False
+    try:
+        return bcrypt.checkpw(plain_password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def _get_seed_owner_credentials() -> tuple[str | None, str | None, str | None]:
     username = (os.environ.get("ADMIN_USERNAME") or "").strip()
     password = os.environ.get("ADMIN_PASSWORD") or ""
+    email = (os.environ.get("ADMIN_EMAIL") or os.environ.get("LICENSE_SUPPORT_CONTACT") or "").strip() or None
     if not username or not password:
-        return None, None
-    return username, password
+        return None, None, email
+    return username, password, email
+
+
+def _seed_initial_owner_user(cur) -> bool:
+    """
+    One-time bootstrap seed: if admin_users is completely empty and ADMIN_USERNAME /
+    ADMIN_PASSWORD are provided in the environment, create the initial SystemOwner (`owner`)
+    account with a bcrypt password hash. Never overwrites existing accounts.
+    """
+    cur.execute("SELECT COUNT(*) AS cnt FROM admin_users")
+    row = cur.fetchone()
+    existing_count = int((row or {}).get("cnt", 0))
+    if existing_count > 0:
+        return False
+
+    seed_user, seed_pass, seed_email = _get_seed_owner_credentials()
+    if not seed_user or not seed_pass:
+        return False
+
+    now = _utc_now()
+    pw_hash = _hash_password(seed_pass)
+    cur.execute(
+        """
+        INSERT INTO admin_users (username, password_hash, email, role, created_at, updated_at)
+        VALUES (%s, %s, %s, 'owner', %s, %s)
+        """,
+        (seed_user, pw_hash, seed_email, now, now),
+    )
+    logger.info("Seeded initial SystemOwner account '%s' into admin_users.", seed_user)
+    return True
 
 
 def _get_session_signing_key() -> bytes:
@@ -212,15 +279,25 @@ def _b64url_decode(val: str) -> bytes:
     return base64.urlsafe_b64decode(padded.encode("ascii"))
 
 
-def _sign_session_token(username: str, jti: str, issued_at: datetime, expires_at: datetime) -> str:
+def _sign_session_token(
+    username: str,
+    jti: str,
+    issued_at: datetime,
+    expires_at: datetime,
+    role: str = "owner",
+    user_id: int | None = None,
+) -> str:
     key = _get_session_signing_key()
     header_b64 = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8"))
     payload = {
         "sub": username,
+        "role": (role or "owner").strip().lower(),
         "jti": jti,
         "iat": int(issued_at.timestamp()),
         "exp": int(expires_at.timestamp()),
     }
+    if user_id is not None:
+        payload["uid"] = int(user_id)
     payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
     sig = hmac.new(key, signing_input, hashlib.sha256).digest()
@@ -271,21 +348,51 @@ def _verify_active_session(token: str | None) -> dict | None:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT jti, username, expires_at, revoked_at FROM admin_sessions WHERE jti = %s",
+                "SELECT jti, user_id, username, role, expires_at, revoked_at FROM admin_sessions WHERE jti = %s",
                 (payload["jti"],),
             )
             row = cur.fetchone()
+            if row is None or row.get("revoked_at") is not None:
+                return None
+            expires_at = _as_utc(row.get("expires_at"))
+            if expires_at is None or expires_at <= _utc_now():
+                return None
+            if not hmac.compare_digest(str(row.get("username") or ""), payload["sub"]):
+                return None
 
-    if row is None or row.get("revoked_at") is not None:
-        return None
-    expires_at = _as_utc(row.get("expires_at"))
-    if expires_at is None or expires_at <= _utc_now():
-        return None
-    if not hmac.compare_digest(str(row.get("username") or ""), payload["sub"]):
-        return None
+            user_id = row.get("user_id") if row.get("user_id") is not None else payload.get("uid")
+            email = None
+            role = (row.get("role") or payload.get("role") or "owner").strip().lower()
+            username = str(row["username"])
+            if user_id is not None:
+                cur.execute(
+                    "SELECT id, username, email, role FROM admin_users WHERE id = %s",
+                    (int(user_id),),
+                )
+                u_row = cur.fetchone()
+                if u_row is None:
+                    return None
+                username = str(u_row["username"])
+                email = u_row.get("email")
+                role = (u_row.get("role") or role).strip().lower()
+            else:
+                cur.execute(
+                    "SELECT id, username, email, role FROM admin_users WHERE LOWER(username) = LOWER(%s)",
+                    (username,),
+                )
+                u_row = cur.fetchone()
+                if u_row is not None:
+                    user_id = int(u_row["id"])
+                    username = str(u_row["username"])
+                    email = u_row.get("email")
+                    role = (u_row.get("role") or role).strip().lower()
+
     return {
         "jti": row["jti"],
-        "username": row["username"],
+        "user_id": int(user_id) if user_id is not None else None,
+        "username": username,
+        "email": email,
+        "role": role,
         "expires_at": _iso_utc(expires_at),
     }
 
@@ -351,6 +458,13 @@ def _require_admin_session(request: Request) -> dict:
     if session is None:
         raise HTTPException(status_code=401, detail="Authentication required.")
     _check_admin(_get_admin_token())
+    return session
+
+
+def _require_owner_session(request: Request) -> dict:
+    session = _require_admin_session(request)
+    if (session.get("role") or "").strip().lower() != "owner":
+        raise HTTPException(status_code=403, detail="SystemOwner (owner) privileges are required.")
     return session
 
 
@@ -511,6 +625,13 @@ class CreateLicenseRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     username: str
     password: str
+
+
+class UpdateOwnerAccountRequest(BaseModel):
+    current_password: str
+    username: str | None = None
+    email: str | None = None
+    new_password: str | None = None
 
 
 # ============================================================== PUBLIC ROUTES
@@ -712,14 +833,33 @@ def admin_login(req: AdminLoginRequest, request: Request, response: Response):
     ip = _client_ip(request)
     _check_login_rate_limit(ip)
 
-    expected_user, expected_pass = _get_admin_credentials()
     admin_tok = _get_admin_token()
-    if not expected_user or not expected_pass or not admin_tok:
+    if not admin_tok:
         raise HTTPException(status_code=503, detail="Admin login is not configured on the server.")
 
-    user_ok = hmac.compare_digest(req.username.encode("utf-8"), expected_user.encode("utf-8"))
-    pass_ok = hmac.compare_digest(req.password.encode("utf-8"), expected_pass.encode("utf-8"))
-    if not (user_ok and pass_ok):
+    submitted_user = (req.username or "").strip()
+    submitted_pass = req.password or ""
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _seed_initial_owner_user(cur)
+            cur.execute("SELECT COUNT(*) AS cnt FROM admin_users")
+            cnt_row = cur.fetchone()
+            if int((cnt_row or {}).get("cnt", 0)) == 0:
+                raise HTTPException(status_code=503, detail="Admin login is not configured on the server.")
+
+            cur.execute(
+                """
+                SELECT id, username, password_hash, email, role
+                FROM admin_users
+                WHERE LOWER(username) = LOWER(%s)
+                LIMIT 1
+                """,
+                (submitted_user,),
+            )
+            user_row = cur.fetchone()
+
+    if user_row is None or not _verify_password(submitted_pass, user_row.get("password_hash")):
         _record_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
@@ -728,19 +868,23 @@ def admin_login(req: AdminLoginRequest, request: Request, response: Response):
     now = _utc_now()
     ttl = max(60, int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", str(SESSION_TTL_SECONDS))))
     expires_at = now + timedelta(seconds=ttl)
+    user_id = int(user_row["id"])
+    canonical_username = str(user_row["username"])
+    user_role = (user_row.get("role") or "admin").strip().lower()
+    user_email = user_row.get("email")
 
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM admin_sessions WHERE expires_at < %s", (now - timedelta(days=1),))
             cur.execute(
                 """
-                INSERT INTO admin_sessions (jti, username, created_at, expires_at)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO admin_sessions (jti, user_id, username, role, created_at, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (jti, expected_user, now, expires_at),
+                (jti, user_id, canonical_username, user_role, now, expires_at),
             )
 
-    token = _sign_session_token(expected_user, jti, now, expires_at)
+    token = _sign_session_token(canonical_username, jti, now, expires_at, role=user_role, user_id=user_id)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
@@ -752,7 +896,9 @@ def admin_login(req: AdminLoginRequest, request: Request, response: Response):
     )
     return {
         "ok": True,
-        "username": expected_user,
+        "username": canonical_username,
+        "email": user_email,
+        "role": user_role,
         "token": token,
         "token_type": "Bearer",
         "expires_in": ttl,
@@ -786,9 +932,193 @@ def admin_logout(request: Request, response: Response):
 def get_admin_session(session: dict = Depends(_require_admin_session)):
     return {
         "authenticated": True,
+        "user_id": session.get("user_id"),
         "username": session["username"],
+        "email": session.get("email"),
+        "role": session.get("role", "owner"),
+        "is_owner": (session.get("role") or "").lower() == "owner",
         "expires_at": session["expires_at"],
         "plans": PLANS,
+    }
+
+
+@app.get("/api/v1/admin/account")
+def get_owner_account(session: dict = Depends(_require_owner_session)):
+    """Return the signed-in SystemOwner profile and admin_users directory (hashes excluded)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, email, role, created_at, updated_at
+                FROM admin_users
+                WHERE id = %s
+                """,
+                (session["user_id"],),
+            )
+            me = cur.fetchone()
+            if me is None:
+                raise HTTPException(status_code=404, detail="Admin account not found.")
+
+            cur.execute(
+                """
+                SELECT id, username, email, role, created_at, updated_at
+                FROM admin_users
+                ORDER BY id ASC
+                """
+            )
+            all_rows = cur.fetchall()
+
+    def _ser(r: dict) -> dict:
+        return {
+            "id": int(r["id"]),
+            "username": r["username"],
+            "email": r.get("email") or "",
+            "role": (r.get("role") or "admin").strip().lower(),
+            "created_at": _iso_utc(r.get("created_at")),
+            "updated_at": _iso_utc(r.get("updated_at")),
+        }
+
+    return {
+        "account": _ser(me),
+        "accounts": [_ser(r) for r in all_rows],
+    }
+
+
+@app.put("/api/v1/admin/account")
+def update_owner_account(
+    req: UpdateOwnerAccountRequest,
+    request: Request,
+    response: Response,
+    session: dict = Depends(_require_owner_session),
+):
+    """
+    Allow SystemOwner (`owner`) to update their own username, email, and/or password.
+    Requires current password verification, hashes new passwords with bcrypt server-side,
+    never logs plaintext credentials, and refreshes the active session token seamlessly.
+    """
+    if not req.current_password:
+        raise HTTPException(status_code=400, detail="Current password is required.")
+
+    now = _utc_now()
+    ttl = max(60, int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", str(SESSION_TTL_SECONDS))))
+    new_jti = secrets.token_urlsafe(24)
+    new_expires_at = now + timedelta(seconds=ttl)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, password_hash, email, role, created_at, updated_at
+                FROM admin_users
+                WHERE id = %s
+                """,
+                (session["user_id"],),
+            )
+            me = cur.fetchone()
+            if me is None:
+                raise HTTPException(status_code=404, detail="Admin account not found.")
+
+            if not _verify_password(req.current_password, me.get("password_hash")):
+                raise HTTPException(status_code=403, detail="Current password is incorrect.")
+
+            new_username = (req.username if req.username is not None else me["username"]).strip()
+            new_email = (req.email if req.email is not None else (me.get("email") or "")).strip()
+            new_pw_raw = req.new_password or ""
+            pw_changed = bool(new_pw_raw)
+
+            if not new_username or len(new_username) < 3:
+                raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
+            if any(ch.isspace() for ch in new_username):
+                raise HTTPException(status_code=400, detail="Username cannot contain whitespace.")
+            if new_email and ("@" not in new_email or "." not in new_email.split("@", 1)[-1]):
+                raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+            if pw_changed and len(new_pw_raw) < 8:
+                raise HTTPException(status_code=400, detail="New password must be at least 8 characters.")
+
+            cur.execute(
+                """
+                SELECT id FROM admin_users
+                WHERE LOWER(username) = LOWER(%s) AND id != %s
+                LIMIT 1
+                """,
+                (new_username, me["id"]),
+            )
+            if cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail="That username is already in use.")
+
+            changed_fields = []
+            if new_username != me["username"]:
+                changed_fields.append("username")
+            if (new_email or None) != (me.get("email") or None):
+                changed_fields.append("email")
+            if pw_changed:
+                changed_fields.append("password")
+
+            new_hash = _hash_password(new_pw_raw) if pw_changed else me["password_hash"]
+            cur.execute(
+                """
+                UPDATE admin_users
+                SET username = %s,
+                    email = %s,
+                    password_hash = %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (new_username, new_email or None, new_hash, now, me["id"]),
+            )
+
+            # Rotate current session (and revoke all sessions if password changed)
+            if pw_changed:
+                cur.execute(
+                    "UPDATE admin_sessions SET revoked_at = %s WHERE user_id = %s AND revoked_at IS NULL",
+                    (now, me["id"]),
+                )
+            else:
+                cur.execute(
+                    "UPDATE admin_sessions SET revoked_at = %s WHERE jti = %s AND revoked_at IS NULL",
+                    (now, session["jti"]),
+                )
+
+            owner_role = (me.get("role") or "owner").strip().lower()
+            cur.execute(
+                """
+                INSERT INTO admin_sessions (jti, user_id, username, role, created_at, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (new_jti, int(me["id"]), new_username, owner_role, now, new_expires_at),
+            )
+
+    fresh_token = _sign_session_token(
+        new_username, new_jti, now, new_expires_at, role=owner_role, user_id=int(me["id"])
+    )
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=fresh_token,
+        httponly=True,
+        samesite="lax",
+        secure=_is_https_request(request),
+        max_age=ttl,
+        path="/",
+    )
+    logger.info(
+        "SystemOwner account id=%s updated fields=%s (username='%s').",
+        me["id"],
+        ",".join(changed_fields) if changed_fields else "none",
+        new_username,
+    )
+    return {
+        "ok": True,
+        "message": "Admin account updated successfully.",
+        "changed_fields": changed_fields,
+        "account": {
+            "id": int(me["id"]),
+            "username": new_username,
+            "email": new_email or "",
+            "role": owner_role,
+            "updated_at": now.isoformat(),
+        },
+        "token": fresh_token,
+        "expires_at": new_expires_at.isoformat(),
     }
 
 

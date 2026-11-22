@@ -4,195 +4,278 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dashboard — ANPR License Admin</title>
+  <title>Control Console — ANPR License Admin</title>
   <style>
     :root {
-      --bg: #f3f5f8;
+      --obsidian: #0f131a;
+      --obsidian-2: #171d27;
+      --obsidian-line: #263041;
+      --bg: #f3f4f6;
       --surface: #ffffff;
-      --surface-alt: #f9fafb;
-      --text: #111827;
-      --muted: #4b5563;
-      --border: #d1d5db;
-      --primary: #1d4ed8;
-      --primary-hover: #1e40af;
-      --success: #15803d;
-      --success-bg: #dcfce7;
-      --danger: #b91c1c;
+      --surface-subtle: #f8fafc;
+      --text: #0f172a;
+      --text-soft: #475569;
+      --text-muted: #64748b;
+      --border: #dde2ea;
+      --border-strong: #c8d0dc;
+      --primary: #0f172a;
+      --primary-hover: #1e293b;
+      --amber: #d97706;
+      --amber-bright: #f59e0b;
+      --amber-bg: #fef3c7;
+      --amber-text: #92400e;
+      --emerald: #059669;
+      --emerald-hover: #047857;
+      --emerald-bg: #dcfce7;
+      --emerald-text: #166534;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
       --danger-bg: #fee2e2;
-      --warn: #b45309;
-      --warn-bg: #fef3c7;
-      --neutral-bg: #e5e7eb;
-      --radius: 10px;
+      --danger-text: #991b1b;
+      --info-bg: #e0f2fe;
+      --info-text: #075985;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+      --shadow-sm: 0 4px 14px rgba(15, 23, 42, 0.06);
+      --font-sans: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
     * {
       box-sizing: border-box;
     }
 
-    body {
+    html, body {
       margin: 0;
+      padding: 0;
+      max-width: 100%;
+      overflow-x: hidden;
       background: var(--bg);
       color: var(--text);
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      line-height: 1.45;
+      font-family: var(--font-sans);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
 
+    /* =====================================================================
+       EXECUTIVE OBSIDIAN HEADER BAR
+       ===================================================================== */
     .topbar {
       position: sticky;
       top: 0;
-      z-index: 20;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
+      z-index: 30;
+      background: var(--obsidian);
+      border-bottom: 2px solid var(--amber);
+      color: #f8fafc;
       padding: 12px 16px;
+      box-shadow: 0 4px 20px rgba(15, 23, 42, 0.18);
     }
 
     .topbar-inner {
-      max-width: 1180px;
+      max-width: 1200px;
       margin: 0 auto;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 10px 16px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      flex: 1 1 220px;
+    }
+
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: var(--obsidian-2);
+      border: 1px solid rgba(245, 158, 11, 0.52);
+      color: var(--amber-bright);
+      font-family: var(--font-mono);
+      font-weight: 800;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
     }
 
     .brand {
       min-width: 0;
-      max-width: 100%;
+    }
+
+    .brand-title-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
     }
 
     .brand h1 {
       margin: 0;
-      font-size: 1.15rem;
+      font-size: 1.05rem;
       font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #ffffff;
+    }
+
+    .role-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: rgba(245, 158, 11, 0.16);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      color: #fcd34d;
+    }
+
+    .role-chip.admin {
+      background: rgba(148, 163, 184, 0.16);
+      border-color: rgba(148, 163, 184, 0.4);
+      color: #e2e8f0;
     }
 
     .session-meta {
-      font-size: 0.82rem;
-      color: var(--muted);
+      font-size: 0.78rem;
+      color: #94a3b8;
       overflow-wrap: anywhere;
+      margin-top: 1px;
     }
 
     .topbar-actions {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-shrink: 0;
     }
 
-    button,
-    select,
-    input {
+    button, select, input {
       font-family: inherit;
     }
 
-    .btn {
-      min-height: 44px;
-      padding: 8px 14px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-      font-size: 0.92rem;
+    .btn-top {
+      min-height: 38px;
+      padding: 6px 13px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--obsidian-line);
+      background: var(--obsidian-2);
+      color: #e2e8f0;
+      font-size: 0.85rem;
       font-weight: 600;
       cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
     }
 
-    .btn:hover:not(:disabled) {
-      background: var(--surface-alt);
+    .btn-top:hover:not(:disabled) {
+      background: #222b3a;
+      border-color: #3b4a62;
+      color: #ffffff;
     }
 
-    .btn:disabled {
-      opacity: 0.6;
+    .btn-top:disabled {
+      opacity: 0.55;
       cursor: not-allowed;
     }
 
-    .btn-primary {
-      background: var(--primary);
-      border-color: var(--primary);
-      color: #fff;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-      background: var(--primary-hover);
-    }
-
-    .btn-success {
-      background: var(--success);
-      border-color: var(--success);
-      color: #fff;
-    }
-
-    .btn-success:hover:not(:disabled) {
-      background: #166534;
-    }
-
-    .btn-danger {
-      background: var(--danger);
-      border-color: var(--danger);
-      color: #fff;
-    }
-
-    .btn-danger:hover:not(:disabled) {
-      background: #991b1b;
-    }
-
-    .btn-sm {
-      min-height: 38px;
-      padding: 6px 10px;
-      font-size: 0.85rem;
-    }
-
+    /* =====================================================================
+       WORKSPACE SHELL & NAVIGATION TABS
+       ===================================================================== */
     .container {
-      max-width: 1180px;
+      max-width: 1200px;
       margin: 0 auto;
-      padding: 16px;
+      padding: 18px 16px 40px;
+    }
+
+    .tabs-bar {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 6px;
+      margin-bottom: 18px;
+      box-shadow: var(--shadow-xs);
     }
 
     .tabs {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       overflow-x: auto;
-      padding-bottom: 4px;
-      margin-bottom: 16px;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .tabs::-webkit-scrollbar {
+      display: none;
     }
 
     .tab-btn {
-      min-height: 44px;
+      min-height: 42px;
       padding: 8px 14px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--surface);
-      color: var(--muted);
-      font-size: 0.92rem;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-soft);
+      font-size: 0.88rem;
       font-weight: 600;
       cursor: pointer;
       white-space: nowrap;
       display: inline-flex;
       align-items: center;
       gap: 8px;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+
+    .tab-btn:hover:not(.active) {
+      background: var(--surface-subtle);
+      color: var(--text);
     }
 
     .tab-btn.active {
       background: var(--primary);
       border-color: var(--primary);
       color: #ffffff;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.16);
+    }
+
+    .tab-btn.hidden {
+      display: none;
     }
 
     .count-pill {
-      padding: 2px 8px;
+      padding: 1px 7px;
       border-radius: 999px;
-      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
       font-weight: 700;
-      background: rgba(17, 24, 39, 0.1);
-      color: inherit;
+      background: #e2e8f0;
+      color: #334155;
+      font-variant-numeric: tabular-nums;
     }
 
     .tab-btn.active .count-pill {
-      background: rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.2);
+      color: #ffffff;
+    }
+
+    .count-pill.has-alert {
+      background: var(--amber-bg);
+      color: var(--amber-text);
+    }
+
+    .tab-btn.active .count-pill.has-alert {
+      background: var(--amber-bright);
+      color: #0f172a;
     }
 
     .panel {
@@ -203,18 +286,178 @@
       display: block;
     }
 
+    /* =====================================================================
+       BUTTONS, CARDS & INPUTS
+       ===================================================================== */
+    .btn {
+      min-height: 42px;
+      padding: 8px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-strong);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: var(--surface-subtle);
+      border-color: #94a3b8;
+    }
+
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+
+    .btn-success {
+      background: var(--emerald);
+      border-color: var(--emerald);
+      color: #ffffff;
+    }
+
+    .btn-success:hover:not(:disabled) {
+      background: var(--emerald-hover);
+      border-color: var(--emerald-hover);
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      border-color: var(--danger);
+      color: #ffffff;
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background: var(--danger-hover);
+      border-color: var(--danger-hover);
+    }
+
+    .btn-sm {
+      min-height: 36px;
+      padding: 6px 11px;
+      font-size: 0.82rem;
+    }
+
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 16px;
+      padding: 18px;
       margin-bottom: 16px;
+      box-shadow: var(--shadow-xs);
+    }
+
+    .card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px 12px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #eef1f5;
+    }
+
+    .card-eyebrow {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--amber);
+      margin-bottom: 2px;
     }
 
     .card-title {
-      margin: 0 0 12px;
+      margin: 0;
       font-size: 1.02rem;
       font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .card-subtitle {
+      margin: 2px 0 0;
+      font-size: 0.85rem;
+      color: var(--text-soft);
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+      word-break: break-all;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-active,
+    .badge-approved {
+      background: var(--emerald-bg);
+      color: var(--emerald-text);
+    }
+
+    .badge-revoked,
+    .badge-rejected {
+      background: var(--danger-bg);
+      color: var(--danger-text);
+    }
+
+    .badge-expired {
+      background: var(--amber-bg);
+      color: var(--amber-text);
+    }
+
+    .badge-pending {
+      background: var(--info-bg);
+      color: var(--info-text);
+    }
+
+    .badge-owner {
+      background: var(--amber-bg);
+      color: var(--amber-text);
+      border: 1px solid #fcd34d;
+    }
+
+    .badge-admin {
+      background: #e2e8f0;
+      color: #334155;
+    }
+
+    .empty-state {
+      background: var(--surface);
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--radius);
+      padding: 32px 18px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.92rem;
     }
 
     .toast {
@@ -224,72 +467,25 @@
       left: 16px;
       max-width: 440px;
       margin-left: auto;
-      z-index: 50;
-      padding: 12px 14px;
+      z-index: 60;
+      padding: 12px 15px;
       border-radius: 10px;
-      border: 1px solid var(--border);
-      background: #111827;
+      border: 1px solid #334155;
+      background: var(--obsidian);
       color: #ffffff;
-      font-size: 0.92rem;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+      font-size: 0.9rem;
+      font-weight: 500;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.32);
       display: none;
     }
 
-    .toast.visible {
-      display: block;
-    }
+    .toast.visible { display: block; }
+    .toast.error { background: #991b1b; border-color: #7f1d1d; }
+    .toast.success { background: #065f46; border-color: #047857; }
 
-    .toast.error {
-      background: #991b1b;
-      border-color: #7f1d1d;
-    }
-
-    .toast.success {
-      background: #166534;
-      border-color: #14532d;
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 3px 9px;
-      border-radius: 999px;
-      font-size: 0.78rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-    }
-
-    .badge-active,
-    .badge-approved {
-      background: var(--success-bg);
-      color: var(--success);
-    }
-
-    .badge-revoked,
-    .badge-rejected {
-      background: var(--danger-bg);
-      color: var(--danger);
-    }
-
-    .badge-expired {
-      background: var(--warn-bg);
-      color: var(--warn);
-    }
-
-    .badge-pending {
-      background: #dbeafe;
-      color: #1e40af;
-    }
-
-    .empty-state {
-      background: var(--surface);
-      border: 1px dashed var(--border);
-      border-radius: var(--radius);
-      padding: 28px 16px;
-      text-align: center;
-      color: var(--muted);
-    }
-
+    /* =====================================================================
+       PAYMENT SUBMISSION & HISTORY CARDS
+       ===================================================================== */
     .grid-cards {
       display: grid;
       grid-template-columns: 1fr;
@@ -306,10 +502,11 @@
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 14px;
+      padding: 16px;
       display: flex;
       flex-direction: column;
       gap: 12px;
+      box-shadow: var(--shadow-xs);
     }
 
     .sub-head {
@@ -317,36 +514,37 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 8px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #eef1f5;
     }
 
     .sub-id {
-      font-size: 0.85rem;
-      color: var(--muted);
-      font-weight: 600;
-    }
-
-    .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      word-break: break-all;
+      font-size: 0.76rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 2px;
     }
 
     .kv-list {
       display: grid;
       grid-template-columns: auto 1fr;
-      gap: 6px 12px;
-      font-size: 0.9rem;
+      gap: 6px 14px;
+      font-size: 0.88rem;
     }
 
     .kv-label {
-      color: var(--muted);
+      color: var(--text-muted);
       font-weight: 600;
+      font-size: 0.8rem;
     }
 
     .thumb-wrap {
       border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #f9fafb;
-      padding: 6px;
+      border-radius: var(--radius-sm);
+      background: #f8fafc;
+      padding: 8px;
       text-align: center;
     }
 
@@ -362,8 +560,8 @@
 
     .thumb-hint {
       margin-top: 6px;
-      font-size: 0.78rem;
-      color: var(--muted);
+      font-size: 0.76rem;
+      color: var(--text-muted);
     }
 
     .sub-actions {
@@ -373,10 +571,13 @@
       margin-top: auto;
     }
 
+    /* =====================================================================
+       FORMS, FILTERS & LICENSES TABLE
+       ===================================================================== */
     .form-grid {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 10px;
+      gap: 12px;
     }
 
     @media (min-width: 720px) {
@@ -389,9 +590,11 @@
     .field label {
       display: block;
       margin-bottom: 5px;
-      font-size: 0.86rem;
-      font-weight: 600;
-      color: var(--muted);
+      font-size: 0.74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-soft);
     }
 
     .field input,
@@ -399,12 +602,22 @@
     .plan-select {
       width: 100%;
       min-height: 44px;
-      padding: 8px 10px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-size: 16px;
-      background: #fff;
+      padding: 9px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      font-size: 15px;
+      background: #fbfcfd;
       color: var(--text);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+
+    .field input:focus,
+    .search-input:focus,
+    .plan-select:focus {
+      outline: none;
+      background: #ffffff;
+      border-color: var(--amber);
+      box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.16);
     }
 
     .toolbar {
@@ -417,31 +630,32 @@
     }
 
     .search-input {
-      max-width: 340px;
+      max-width: 380px;
+      background: var(--surface);
     }
 
     .filter-pills {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
 
     .pill-btn {
       min-height: 38px;
-      padding: 6px 12px;
+      padding: 6px 13px;
       border-radius: 999px;
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-strong);
       background: var(--surface);
-      color: var(--muted);
-      font-size: 0.86rem;
+      color: var(--text-soft);
+      font-size: 0.84rem;
       font-weight: 600;
       cursor: pointer;
     }
 
     .pill-btn.active {
-      background: #111827;
-      border-color: #111827;
+      background: var(--primary);
+      border-color: var(--primary);
       color: #ffffff;
     }
 
@@ -450,28 +664,34 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       overflow: hidden;
+      box-shadow: var(--shadow-xs);
     }
 
     table.lic-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
 
     table.lic-table th,
     table.lic-table td {
-      padding: 10px 12px;
-      border-bottom: 1px solid #e5e7eb;
+      padding: 11px 13px;
+      border-bottom: 1px solid #eef1f5;
       text-align: left;
       vertical-align: top;
     }
 
     table.lic-table th {
-      background: var(--surface-alt);
-      font-size: 0.8rem;
+      background: var(--surface-subtle);
+      font-size: 0.74rem;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.03em;
-      color: var(--muted);
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+    }
+
+    table.lic-table tbody tr:hover {
+      background: #fafbfd;
     }
 
     table.lic-table tr:last-child td {
@@ -495,8 +715,8 @@
     .plan-select {
       width: auto;
       min-width: 165px;
-      min-height: 38px;
-      font-size: 0.88rem;
+      min-height: 36px;
+      font-size: 0.84rem;
       padding: 4px 8px;
     }
 
@@ -504,6 +724,7 @@
       .table-wrap {
         background: transparent;
         border: none;
+        box-shadow: none;
       }
 
       table.lic-table thead {
@@ -522,22 +743,26 @@
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: var(--radius);
-        padding: 12px;
+        padding: 14px;
         margin-bottom: 12px;
+        box-shadow: var(--shadow-xs);
       }
 
       table.lic-table td {
         display: flex;
         justify-content: space-between;
         gap: 10px;
-        padding: 6px 0;
-        border-bottom: 1px solid #f3f4f6;
+        padding: 7px 0;
+        border-bottom: 1px solid #f1f5f9;
       }
 
       table.lic-table td::before {
         content: attr(data-label);
-        font-weight: 600;
-        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-muted);
         flex-shrink: 0;
       }
 
@@ -562,27 +787,148 @@
       }
     }
 
+    /* =====================================================================
+       MANAGE ADMIN ACCOUNT (SYSTEM OWNER)
+       ===================================================================== */
+    .account-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    @media (min-width: 900px) {
+      .account-layout {
+        grid-template-columns: 1.35fr 1fr;
+        align-items: start;
+      }
+    }
+
+    .account-form-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    @media (min-width: 600px) {
+      .account-form-grid.two-col {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    .pw-input-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .pw-input-wrap input {
+      padding-right: 70px;
+    }
+
+    .pw-toggle {
+      position: absolute;
+      right: 6px;
+      min-height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #f8fafc;
+      color: var(--text-soft);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .confirm-gate {
+      margin-top: 6px;
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-left: 3px solid var(--amber);
+    }
+
+    .confirm-gate-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--amber-text);
+      margin-bottom: 4px;
+    }
+
+    .confirm-gate-hint {
+      font-size: 0.82rem;
+      color: #78350f;
+      margin-bottom: 10px;
+    }
+
+    .inline-status {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 0.86rem;
+      font-weight: 500;
+    }
+
+    .inline-status.visible { display: block; }
+    .inline-status.ok {
+      background: var(--emerald-bg);
+      color: var(--emerald-text);
+      border: 1px solid #bbf7d0;
+    }
+    .inline-status.err {
+      background: var(--danger-bg);
+      color: var(--danger-text);
+      border: 1px solid #fecaca;
+    }
+
+    .profile-kv {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 14px;
+      font-size: 0.88rem;
+    }
+
+    .acct-dir-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px 12px;
+      padding: 10px 0;
+      border-top: 1px solid #eef1f5;
+      font-size: 0.86rem;
+    }
+
+    .acct-dir-row:first-child {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    /* =====================================================================
+       LIGHTBOX MODAL
+       ===================================================================== */
     .modal-backdrop {
       position: fixed;
       inset: 0;
-      z-index: 60;
-      background: rgba(17, 24, 39, 0.84);
+      z-index: 70;
+      background: rgba(15, 23, 42, 0.86);
       display: none;
       align-items: center;
       justify-content: center;
       padding: 16px;
     }
 
-    .modal-backdrop.open {
-      display: flex;
-    }
+    .modal-backdrop.open { display: flex; }
 
     .modal-content {
       max-width: 96vw;
       max-height: 92vh;
       background: var(--surface);
       border-radius: var(--radius);
-      padding: 12px;
+      padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 10px;
@@ -593,6 +939,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      flex-wrap: wrap;
     }
 
     .modal-img {
@@ -600,71 +947,41 @@
       max-height: 75vh;
       object-fit: contain;
       border-radius: 6px;
-      background: #111827;
+      background: #0f172a;
     }
 
     /* =====================================================================
-       HOME TAB — STATE A: ALL SYSTEMS ACTIVE (RICH, ANIMATED SAAS SHOWCASE)
+       HOME TAB — STATE A: ALL SYSTEMS ACTIVE (VISUALLY RICH & LUMINOUS)
        ===================================================================== */
     @keyframes homePulseRing {
-      0% {
-        transform: scale(1);
-        opacity: 0.72;
-      }
-
-      72% {
-        transform: scale(2.45);
-        opacity: 0;
-      }
-
-      100% {
-        transform: scale(2.45);
-        opacity: 0;
-      }
+      0% { transform: scale(1); opacity: 0.72; }
+      72% { transform: scale(2.45); opacity: 0; }
+      100% { transform: scale(2.45); opacity: 0; }
     }
 
     @keyframes homeGlowBreath {
-
-      0%,
-      100% {
-        box-shadow: 0 18px 42px rgba(6, 78, 59, 0.28), 0 0 0 1px rgba(52, 211, 153, 0.36), inset 0 1px 0 rgba(167, 243, 208, 0.22);
+      0%, 100% {
+        box-shadow: 0 18px 42px rgba(6, 78, 59, 0.26), 0 0 0 1px rgba(52, 211, 153, 0.36), inset 0 1px 0 rgba(167, 243, 208, 0.2);
       }
-
       50% {
-        box-shadow: 0 22px 54px rgba(16, 185, 129, 0.38), 0 0 0 1px rgba(110, 231, 183, 0.54), inset 0 1px 0 rgba(209, 250, 229, 0.34);
+        box-shadow: 0 22px 54px rgba(16, 185, 129, 0.36), 0 0 0 1px rgba(110, 231, 183, 0.54), inset 0 1px 0 rgba(209, 250, 229, 0.32);
       }
     }
 
     @keyframes homeFadeUp {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
-      }
-
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
     }
 
     @keyframes homeAmbientShift {
-
-      0%,
-      100% {
-        transform: translate3d(0, 0, 0) scale(1);
-        opacity: 0.5;
-      }
-
-      50% {
-        transform: translate3d(18px, -10px, 0) scale(1.06);
-        opacity: 0.75;
-      }
+      0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.48; }
+      50% { transform: translate3d(18px, -10px, 0) scale(1.06); opacity: 0.72; }
     }
 
     .home-good-shell {
       position: relative;
       overflow: hidden;
-      border-radius: 18px;
+      border-radius: 16px;
       padding: 28px;
       color: #ecfdf5;
       background:
@@ -686,7 +1003,7 @@
       animation: homeAmbientShift 7s ease-in-out infinite;
     }
 
-    .home-good-shell>* {
+    .home-good-shell > * {
       position: relative;
       z-index: 1;
     }
@@ -710,7 +1027,7 @@
       border: 1px solid rgba(110, 231, 183, 0.52);
       box-shadow: 0 0 24px rgba(16, 185, 129, 0.25);
       color: #a7f3d0;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -736,9 +1053,9 @@
     }
 
     .good-updated {
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: rgba(167, 243, 208, 0.78);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: var(--font-mono);
     }
 
     .good-hero-grid {
@@ -759,7 +1076,7 @@
     }
 
     .good-eyebrow {
-      font-size: 0.78rem;
+      font-size: 0.75rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.1em;
@@ -769,7 +1086,7 @@
 
     .good-plan-title {
       margin: 0 0 8px;
-      font-size: clamp(1.7rem, 4vw, 2.35rem);
+      font-size: clamp(1.65rem, 4vw, 2.3rem);
       font-weight: 800;
       letter-spacing: -0.025em;
       color: #ffffff;
@@ -810,7 +1127,7 @@
     }
 
     .good-days-num {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: var(--font-mono);
       font-size: 2.75rem;
       font-weight: 800;
       line-height: 1;
@@ -820,7 +1137,7 @@
 
     .good-days-label {
       margin-top: 6px;
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.08em;
@@ -829,7 +1146,7 @@
 
     .good-days-date {
       margin-top: 4px;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: rgba(167, 243, 208, 0.84);
     }
 
@@ -855,7 +1172,7 @@
     }
 
     .good-metric-k {
-      font-size: 0.74rem;
+      font-size: 0.72rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.08em;
@@ -864,8 +1181,8 @@
     }
 
     .good-metric-v {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 1.7rem;
+      font-family: var(--font-mono);
+      font-size: 1.68rem;
       font-weight: 800;
       color: #ffffff;
       line-height: 1.15;
@@ -887,7 +1204,7 @@
 
     .good-fleet-title {
       margin: 0 0 10px;
-      font-size: 0.76rem;
+      font-size: 0.74rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.08em;
@@ -901,7 +1218,7 @@
       gap: 6px 12px;
       padding: 8px 0;
       border-top: 1px solid rgba(148, 163, 184, 0.14);
-      font-size: 0.88rem;
+      font-size: 0.86rem;
       color: #e2e8f0;
     }
 
@@ -916,7 +1233,6 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-
       .home-good-shell,
       .home-good-shell::before,
       .good-beacon::after,
@@ -929,7 +1245,7 @@
     }
 
     /* =====================================================================
-       HOME TAB — STATE B: NEEDS ATTENTION (PLAIN, FLAT, ZERO ANIMATION)
+       HOME TAB — STATE B: NEEDS ATTENTION (DELIBERATELY PLAIN, FLAT, NO MOTION)
        ===================================================================== */
     .home-plain-shell {
       display: flex;
@@ -939,7 +1255,8 @@
 
     .plain-banner {
       background: #ffffff;
-      border: 1px solid #d1d5db;
+      border: 1px solid #cbd5e1;
+      border-left: 3px solid #334155;
       border-radius: 4px;
       padding: 14px 16px;
     }
@@ -948,13 +1265,13 @@
       margin: 0 0 4px;
       font-size: 1.05rem;
       font-weight: 700;
-      color: #111827;
+      color: #0f172a;
     }
 
     .plain-banner p {
       margin: 0;
       font-size: 0.9rem;
-      color: #4b5563;
+      color: #475569;
     }
 
     .plain-metrics {
@@ -965,48 +1282,48 @@
 
     .plain-metric {
       background: #ffffff;
-      border: 1px solid #d1d5db;
+      border: 1px solid #cbd5e1;
       border-radius: 4px;
       padding: 12px 14px;
     }
 
     .plain-metric-k {
-      font-size: 0.74rem;
+      font-size: 0.72rem;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #6b7280;
+      letter-spacing: 0.05em;
+      color: #64748b;
     }
 
     .plain-metric-v {
       margin-top: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: var(--font-mono);
       font-size: 1.35rem;
       font-weight: 700;
-      color: #111827;
+      color: #0f172a;
     }
 
     .plain-metric-sub {
       margin-top: 2px;
       font-size: 0.78rem;
-      color: #6b7280;
+      color: #64748b;
     }
 
     .plain-section {
       background: #ffffff;
-      border: 1px solid #d1d5db;
+      border: 1px solid #cbd5e1;
       border-radius: 4px;
     }
 
     .plain-section-head {
       padding: 10px 14px;
-      border-bottom: 1px solid #e5e7eb;
-      background: #f9fafb;
-      font-size: 0.78rem;
+      border-bottom: 1px solid #e2e8f0;
+      background: #f8fafc;
+      font-size: 0.75rem;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #374151;
+      letter-spacing: 0.05em;
+      color: #334155;
     }
 
     .plain-issue-row {
@@ -1016,12 +1333,10 @@
       justify-content: space-between;
       gap: 10px 14px;
       padding: 12px 14px;
-      border-bottom: 1px solid #e5e7eb;
+      border-bottom: 1px solid #e2e8f0;
     }
 
-    .plain-issue-row:last-child {
-      border-bottom: none;
-    }
+    .plain-issue-row:last-child { border-bottom: none; }
 
     .plain-issue-main {
       flex: 1 1 200px;
@@ -1029,9 +1344,9 @@
     }
 
     .plain-issue-title {
-      font-size: 0.94rem;
+      font-size: 0.92rem;
       font-weight: 600;
-      color: #111827;
+      color: #0f172a;
     }
 
     .plain-issue-tag {
@@ -1039,37 +1354,35 @@
       margin-right: 8px;
       padding: 1px 6px;
       border-radius: 3px;
-      border: 1px solid #9ca3af;
-      background: #f3f4f6;
-      color: #1f2937;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.72rem;
+      border: 1px solid #94a3b8;
+      background: #f1f5f9;
+      color: #1e293b;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
       font-weight: 700;
       vertical-align: middle;
     }
 
     .plain-issue-detail {
       margin-top: 3px;
-      font-size: 0.85rem;
-      color: #4b5563;
+      font-size: 0.84rem;
+      color: #475569;
     }
 
     .plain-jump-btn {
       min-height: 38px;
       padding: 6px 12px;
       border-radius: 4px;
-      border: 1px solid #6b7280;
+      border: 1px solid #64748b;
       background: #ffffff;
-      color: #111827;
+      color: #0f172a;
       font-size: 0.84rem;
       font-weight: 600;
       cursor: pointer;
       white-space: nowrap;
     }
 
-    .plain-jump-btn:hover {
-      background: #f3f4f6;
-    }
+    .plain-jump-btn:hover { background: #f1f5f9; }
 
     .plain-active-row {
       display: flex;
@@ -1077,16 +1390,19 @@
       justify-content: space-between;
       gap: 6px 12px;
       padding: 9px 14px;
-      border-bottom: 1px solid #f3f4f6;
+      border-bottom: 1px solid #f1f5f9;
       font-size: 0.86rem;
-      color: #374151;
+      color: #334155;
     }
 
-    .plain-active-row:last-child {
-      border-bottom: none;
-    }
+    .plain-active-row:last-child { border-bottom: none; }
 
     @media (max-width: 680px) {
+      .topbar { padding: 10px 12px; }
+      .container { padding: 14px 12px 32px; }
+      .topbar-actions { width: 100%; justify-content: flex-end; }
+      .btn-top { flex: 1 1 auto; }
+
       .home-good-shell {
         padding: 20px 16px;
         border-radius: 14px;
@@ -1106,6 +1422,20 @@
       .plain-jump-btn {
         width: 100%;
       }
+
+      #acct-save-btn,
+      #create-license-btn {
+        width: 100%;
+      }
+
+      table.lic-table td {
+        align-items: flex-start;
+        text-align: right;
+      }
+
+      table.lic-table td::before {
+        text-align: left;
+      }
     }
   </style>
 </head>
@@ -1113,46 +1443,65 @@
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand">
-        <h1>ANPR License Admin</h1>
-        <div id="session-meta" class="session-meta">Loading session...</div>
+      <div class="brand-group">
+        <div class="brand-mark" aria-hidden="true">ID</div>
+        <div class="brand">
+          <div class="brand-title-row">
+            <h1>ANPR License Console</h1>
+            <span id="role-chip" class="role-chip" style="display:none;">OWNER</span>
+          </div>
+          <div id="session-meta" class="session-meta">Loading session...</div>
+        </div>
       </div>
       <div class="topbar-actions">
-        <button type="button" id="refresh-btn" class="btn">Refresh</button>
-        <button type="button" id="logout-btn" class="btn">Logout</button>
+        <button type="button" id="refresh-btn" class="btn-top">Refresh</button>
+        <button type="button" id="logout-btn" class="btn-top">Sign Out</button>
       </div>
     </div>
   </header>
 
   <main class="container">
-    <nav class="tabs" role="tablist" aria-label="Admin sections">
-      <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="home">
-        Home <span id="home-pill" class="count-pill">…</span>
-      </button>
-      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="pending">
-        Pending Payments <span id="pending-count" class="count-pill">0</span>
-      </button>
-      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="licenses">
-        Licenses <span id="licenses-count" class="count-pill">0</span>
-      </button>
-      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
-        History <span id="history-count" class="count-pill">0</span>
-      </button>
-    </nav>
+    <div class="tabs-bar">
+      <nav class="tabs" role="tablist" aria-label="Admin sections">
+        <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="home">
+          Home <span id="home-pill" class="count-pill">…</span>
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="pending">
+          Pending Payments <span id="pending-count" class="count-pill">0</span>
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="licenses">
+          Licenses <span id="licenses-count" class="count-pill">0</span>
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
+          History <span id="history-count" class="count-pill">0</span>
+        </button>
+        <button type="button" id="tab-account-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="account">
+          Manage Admin Account
+        </button>
+      </nav>
+    </div>
 
+    <!-- TAB 1: HOME -->
     <section id="panel-home" class="panel active" role="tabpanel">
       <div id="home-summary">
-        <div class="empty-state">Loading overview...</div>
+        <div class="empty-state">Loading system overview...</div>
       </div>
     </section>
 
+    <!-- TAB 2: PENDING PAYMENTS -->
     <section id="panel-pending" class="panel" role="tabpanel">
       <div id="pending-list"></div>
     </section>
 
+    <!-- TAB 3: LICENSES -->
     <section id="panel-licenses" class="panel" role="tabpanel">
       <div class="card">
-        <h2 class="card-title">Create New License</h2>
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">Provisioning</div>
+            <h2 class="card-title">Create New License</h2>
+          </div>
+        </div>
         <form id="create-license-form" class="form-grid">
           <div class="field">
             <label for="new-license-key">License Key</label>
@@ -1173,6 +1522,7 @@
       <div id="licenses-container"></div>
     </section>
 
+    <!-- TAB 4: HISTORY -->
     <section id="panel-history" class="panel" role="tabpanel">
       <div class="filter-pills">
         <button type="button" class="pill-btn active" data-history-filter="all">All Reviewed</button>
@@ -1180,6 +1530,95 @@
         <button type="button" class="pill-btn" data-history-filter="rejected">Rejected</button>
       </div>
       <div id="history-list"></div>
+    </section>
+
+    <!-- TAB 5: MANAGE ADMIN ACCOUNT (SYSTEM OWNER ONLY) -->
+    <section id="panel-account" class="panel" role="tabpanel">
+      <div class="account-layout">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-eyebrow">SystemOwner Credentials</div>
+              <h2 class="card-title">Update Owner Account</h2>
+              <p class="card-subtitle">Change your dashboard username, email, or password. Passwords are hashed server-side with bcrypt.</p>
+            </div>
+          </div>
+
+          <form id="owner-account-form" class="account-form-grid" novalidate>
+            <div class="account-form-grid two-col">
+              <div class="field">
+                <label for="acct-username">Username</label>
+                <input id="acct-username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+              </div>
+              <div class="field">
+                <label for="acct-email">Email Address</label>
+                <input id="acct-email" type="email" autocomplete="email" placeholder="owner@example.com" />
+              </div>
+            </div>
+
+            <div class="account-form-grid two-col">
+              <div class="field">
+                <label for="acct-new-password">New Password (optional)</label>
+                <div class="pw-input-wrap">
+                  <input id="acct-new-password" type="password" autocomplete="new-password" placeholder="Optional (min 8 chars)" />
+                  <button type="button" class="pw-toggle" data-toggle-target="acct-new-password">Show</button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="acct-confirm-password">Confirm New Password</label>
+                <div class="pw-input-wrap">
+                  <input id="acct-confirm-password" type="password" autocomplete="new-password" placeholder="Re-enter new password" />
+                  <button type="button" class="pw-toggle" data-toggle-target="acct-confirm-password">Show</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="confirm-gate">
+              <div class="confirm-gate-title">Current Password Confirmation Required</div>
+              <div class="confirm-gate-hint">Enter your current SystemOwner password to authorize these credential updates.</div>
+              <div class="field" style="margin:0;">
+                <label for="acct-current-password">Current Password</label>
+                <div class="pw-input-wrap">
+                  <input id="acct-current-password" type="password" autocomplete="current-password" required />
+                  <button type="button" class="pw-toggle" data-toggle-target="acct-current-password">Show</button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <button type="submit" id="acct-save-btn" class="btn btn-primary">Save Account Changes</button>
+            </div>
+            <div id="acct-status" class="inline-status" role="status"></div>
+          </form>
+        </div>
+
+        <div>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-eyebrow">Active Identity</div>
+                <h2 class="card-title">Signed-In Profile</h2>
+              </div>
+              <span class="badge badge-owner">SYSTEM OWNER</span>
+            </div>
+            <div id="acct-profile-meta" class="profile-kv">
+              <span class="kv-label">Loading...</span><span></span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-eyebrow">Postgres Directory</div>
+                <h2 class="card-title">Dashboard Admin Accounts</h2>
+              </div>
+            </div>
+            <div id="acct-directory">
+              <div class="empty-state">Loading admin accounts...</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -1206,11 +1645,13 @@
       const state = {
         activeTab: "home",
         historyFilter: "all",
+        session: null,
         plans: {},
         pending: [],
         licenses: [],
         history: [],
         summary: null,
+        accountData: null,
         licenseSearch: "",
       };
 
@@ -1223,7 +1664,7 @@
         if (toastTimer) clearTimeout(toastTimer);
         toastTimer = setTimeout(function () {
           toastEl.classList.remove("visible");
-        }, 4000);
+        }, 4200);
       }
 
       function escapeHtml(val) {
@@ -1317,6 +1758,9 @@
       }
 
       function setActiveTab(tabName) {
+        if (tabName === "account" && !(state.session && state.session.is_owner)) {
+          return;
+        }
         state.activeTab = tabName;
         document.querySelectorAll(".tab-btn").forEach(function (btn) {
           const active = btn.dataset.tab === tabName;
@@ -1326,6 +1770,9 @@
         document.querySelectorAll(".panel").forEach(function (panel) {
           panel.classList.toggle("active", panel.id === "panel-" + tabName);
         });
+        if (tabName === "account" && !state.accountData) {
+          loadAccountData().catch(function () { });
+        }
       }
 
       function openLightbox(sub) {
@@ -1345,7 +1792,9 @@
       }
 
       function renderPending() {
-        document.getElementById("pending-count").textContent = String(state.pending.length);
+        const pill = document.getElementById("pending-count");
+        pill.textContent = String(state.pending.length);
+        pill.classList.toggle("has-alert", state.pending.length > 0);
         const root = document.getElementById("pending-list");
         if (!state.pending.length) {
           root.innerHTML = '<div class="empty-state">No pending payment submissions right now.</div>';
@@ -1513,6 +1962,49 @@
         root.innerHTML = '<div class="grid-cards">' + html + '</div>';
       }
 
+      function renderAccountPanel() {
+        const data = state.accountData;
+        if (!data || !data.account) return;
+        const acct = data.account;
+        const uEl = document.getElementById("acct-username");
+        const eEl = document.getElementById("acct-email");
+        if (uEl) uEl.value = acct.username || "";
+        if (eEl) eEl.value = acct.email || "";
+
+        const profileEl = document.getElementById("acct-profile-meta");
+        if (profileEl) {
+          profileEl.innerHTML =
+            '<span class="kv-label">Username</span><strong class="mono">' + escapeHtml(acct.username) + '</strong>' +
+            '<span class="kv-label">Email</span><span class="mono">' + escapeHtml(acct.email || "Not set") + '</span>' +
+            '<span class="kv-label">Role</span><span>' + escapeHtml((acct.role || "owner").toUpperCase()) + '</span>' +
+            '<span class="kv-label">Created</span><span>' + escapeHtml(formatDate(acct.created_at)) + '</span>' +
+            '<span class="kv-label">Updated</span><span>' + escapeHtml(formatDate(acct.updated_at)) + '</span>';
+        }
+
+        const dirEl = document.getElementById("acct-directory");
+        const rows = data.accounts || [];
+        if (dirEl) {
+          if (!rows.length) {
+            dirEl.innerHTML = '<div class="empty-state">No admin accounts found.</div>';
+          } else {
+            dirEl.innerHTML = rows.map(function (u) {
+              const isOwner = (u.role || "").toLowerCase() === "owner";
+              const badgeCls = isOwner ? "badge-owner" : "badge-admin";
+              const roleLabel = isOwner ? "SYSTEM OWNER" : escapeHtml((u.role || "admin").toUpperCase());
+              return (
+                '<div class="acct-dir-row">' +
+                '<div>' +
+                '<div><strong class="mono">' + escapeHtml(u.username) + '</strong></div>' +
+                '<div style="font-size:0.8rem; color:var(--text-muted);">' + escapeHtml(u.email || "No email set") + '</div>' +
+                '</div>' +
+                '<span class="badge ' + badgeCls + '">' + roleLabel + '</span>' +
+                '</div>'
+              );
+            }).join("");
+          }
+        }
+      }
+
       function formatInr(amount) {
         const n = Number(amount || 0);
         try {
@@ -1572,7 +2064,10 @@
         const revenueMonth = Number(c.revenue_this_month_inr || 0);
 
         if (isGood) {
-          if (pill) pill.textContent = "OK";
+          if (pill) {
+            pill.textContent = "OK";
+            pill.classList.remove("has-alert");
+          }
           const daysRem = p && p.days_remaining !== null && p.days_remaining !== undefined
             ? Number(p.days_remaining)
             : null;
@@ -1652,7 +2147,10 @@
         }
 
         /* State B — Needs Attention: deliberately plain, flat, zero animation */
-        if (pill) pill.textContent = String(issues.length || "!");
+        if (pill) {
+          pill.textContent = String(issues.length || "!");
+          pill.classList.add("has-alert");
+        }
         const issueCountLabel = issues.length === 1 ? "1 item requires attention." : issues.length + " items require attention.";
         const issuesHtml = issues.map(function (iss) {
           const target = iss.target_tab === "payments" ? "pending" : (iss.target_tab || "licenses");
@@ -1747,19 +2245,56 @@
         renderSummary();
       }
 
-      async function loadAllData() {
-        const session = await apiFetch("/api/v1/admin/session");
-        state.plans = session.plans || {};
+      async function loadAccountData() {
+        if (!(state.session && state.session.is_owner)) return;
+        state.accountData = await apiFetch("/api/v1/admin/account");
+        renderAccountPanel();
+      }
+
+      function applySessionHeader(session) {
+        state.session = session;
+        state.plans = session.plans || state.plans || {};
+        const isOwner = Boolean(session.is_owner || (session.role || "").toLowerCase() === "owner");
+        const roleChip = document.getElementById("role-chip");
+        if (roleChip) {
+          roleChip.style.display = "inline-flex";
+          roleChip.textContent = isOwner ? "SYSTEM OWNER" : (session.role || "ADMIN").toUpperCase();
+          roleChip.classList.toggle("admin", !isOwner);
+        }
         document.getElementById("session-meta").textContent =
           "Signed in as " + (session.username || "admin") +
           (session.expires_at ? " • Session expires " + formatDate(session.expires_at) : "");
 
-        await Promise.all([loadPending(), loadLicenses(), loadHistory(), loadSummary()]);
+        const acctTabBtn = document.getElementById("tab-account-btn");
+        if (acctTabBtn) {
+          acctTabBtn.classList.toggle("hidden", !isOwner);
+        }
+      }
+
+      async function loadAllData() {
+        const session = await apiFetch("/api/v1/admin/session");
+        applySessionHeader(session);
+
+        const jobs = [loadPending(), loadLicenses(), loadHistory(), loadSummary()];
+        if (session.is_owner) {
+          jobs.push(loadAccountData());
+        }
+        await Promise.all(jobs);
       }
 
       document.querySelectorAll(".tab-btn").forEach(function (btn) {
         btn.addEventListener("click", function () {
           setActiveTab(btn.dataset.tab);
+        });
+      });
+
+      document.querySelectorAll("[data-toggle-target]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const input = document.getElementById(btn.dataset.toggleTarget);
+          if (!input) return;
+          const show = input.type === "password";
+          input.type = show ? "text" : "password";
+          btn.textContent = show ? "Hide" : "Show";
         });
       });
 
@@ -1783,7 +2318,7 @@
         btn.disabled = true;
         try {
           await loadAllData();
-          showToast("Refreshed.", "success");
+          showToast("Dashboard refreshed.", "success");
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
         } finally {
@@ -1806,6 +2341,85 @@
           // Proceed with local cleanup and redirect
         }
         redirectToLogin(false);
+      });
+
+      document.getElementById("owner-account-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const statusEl = document.getElementById("acct-status");
+        const saveBtn = document.getElementById("acct-save-btn");
+        const username = document.getElementById("acct-username").value.trim();
+        const email = document.getElementById("acct-email").value.trim();
+        const newPassword = document.getElementById("acct-new-password").value;
+        const confirmPassword = document.getElementById("acct-confirm-password").value;
+        const currentPassword = document.getElementById("acct-current-password").value;
+
+        function setInline(msg, ok) {
+          statusEl.textContent = msg;
+          statusEl.className = "inline-status visible " + (ok ? "ok" : "err");
+        }
+
+        statusEl.className = "inline-status";
+        if (!username || username.length < 3) {
+          setInline("Username must be at least 3 characters.", false);
+          return;
+        }
+        if (newPassword && newPassword.length < 8) {
+          setInline("New password must be at least 8 characters.", false);
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          setInline("New password and confirmation do not match.", false);
+          return;
+        }
+        if (!currentPassword) {
+          setInline("Enter your current password to confirm changes.", false);
+          return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving...";
+        try {
+          const payload = {
+            current_password: currentPassword,
+            username: username,
+            email: email,
+          };
+          if (newPassword) {
+            payload.new_password = newPassword;
+          }
+          const res = await apiFetch("/api/v1/admin/account", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (res.token) {
+            sessionStorage.setItem(TOKEN_KEY, res.token);
+          }
+          if (res.expires_at) {
+            sessionStorage.setItem(EXPIRES_KEY, res.expires_at);
+          }
+          document.getElementById("acct-new-password").value = "";
+          document.getElementById("acct-confirm-password").value = "";
+          document.getElementById("acct-current-password").value = "";
+
+          const freshSession = await apiFetch("/api/v1/admin/session");
+          applySessionHeader(freshSession);
+          await loadAccountData();
+
+          const fieldsTxt = (res.changed_fields && res.changed_fields.length)
+            ? " Updated: " + res.changed_fields.join(", ") + "."
+            : "";
+          setInline("Account updated successfully." + fieldsTxt, true);
+          showToast("SystemOwner credentials updated." + fieldsTxt, "success");
+        } catch (err) {
+          if (err.message !== "Session expired") {
+            setInline(err.message, false);
+            showToast(err.message, "error");
+          }
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save Account Changes";
+        }
       });
 
       document.getElementById("create-license-form").addEventListener("submit", async function (evt) {
