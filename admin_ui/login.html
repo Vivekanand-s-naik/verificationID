@@ -3,28 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sign In — ANPR License Console</title>
+  <title>Sign In — ANPR License Admin</title>
   <style>
     :root {
-      --obsidian: #0d1117;
-      --obsidian-elevated: #141923;
-      --obsidian-border: #232b38;
-      --canvas: #f3f4f6;
+      --bg: #f6f7f9;
       --surface: #ffffff;
-      --text: #0f172a;
-      --text-soft: #475569;
-      --border: #dce1e8;
-      --amber: #d97706;
-      --amber-soft: #fef3c7;
-      --primary: #0f172a;
-      --primary-hover: #1e293b;
+      --surface-subtle: #f9fafb;
+      --text: #111827;
+      --text-soft: #4b5563;
+      --text-muted: #6b7280;
+      --border: #e2e5ea;
+      --border-strong: #d1d5db;
+      --primary: #111827;
+      --primary-hover: #1f2937;
       --danger-bg: #fef2f2;
       --danger-border: #fecaca;
       --danger-text: #991b1b;
-      --info-bg: #f8fafc;
-      --info-border: #cbd5e1;
-      --info-text: #334155;
-      --radius: 12px;
+      --info-bg: #f9fafb;
+      --info-border: #d1d5db;
+      --info-text: #374151;
+      --radius: 6px;
+      --radius-sm: 4px;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
     }
 
     * { box-sizing: border-box; }
@@ -34,6 +34,12 @@
       padding: 0;
       max-width: 100%;
       overflow-x: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
     }
 
     body {
@@ -43,100 +49,66 @@
       align-items: center;
       justify-content: center;
       padding: 20px 16px;
-      background:
-        radial-gradient(circle at 20% 0%, rgba(217, 119, 6, 0.14) 0%, transparent 42%),
-        radial-gradient(circle at 85% 100%, rgba(16, 185, 129, 0.1) 0%, transparent 45%),
-        var(--obsidian);
-      color: var(--text);
-      font-family: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
-      line-height: 1.5;
-      -webkit-font-smoothing: antialiased;
     }
 
     .auth-shell {
       width: 100%;
-      max-width: 420px;
+      max-width: 390px;
     }
 
     .brand-bar {
+      margin-bottom: 12px;
       display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 18px;
-      padding: 0 4px;
-    }
-
-    .brand-mark {
-      width: 38px;
-      height: 38px;
-      border-radius: 9px;
-      background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
-      border: 1px solid rgba(217, 119, 6, 0.55);
-      box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.15), 0 8px 20px rgba(0, 0, 0, 0.35);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #f59e0b;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-weight: 800;
-      font-size: 0.84rem;
-      letter-spacing: 0.04em;
-      flex-shrink: 0;
-    }
-
-    .brand-copy {
-      min-width: 0;
-    }
-
-    .brand-eyebrow {
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #f59e0b;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
     }
 
     .brand-name {
-      font-size: 1.05rem;
-      font-weight: 700;
-      color: #f8fafc;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text);
       letter-spacing: -0.01em;
+    }
+
+    .brand-scope {
+      font-size: 0.78rem;
+      color: var(--text-muted);
     }
 
     .card {
       width: 100%;
       background: var(--surface);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-top: 3px solid var(--amber);
+      border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 26px 24px 24px;
-      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.42);
+      padding: 22px 20px 20px;
     }
 
     .header {
-      margin-bottom: 20px;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
     }
 
     .title {
-      margin: 0 0 4px;
-      font-size: 1.32rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
+      margin: 0 0 2px;
+      font-size: 1.1rem;
+      font-weight: 600;
       color: var(--text);
     }
 
     .subtitle {
       margin: 0;
-      font-size: 0.9rem;
-      color: var(--text-soft);
+      font-size: 0.84rem;
+      color: var(--text-muted);
     }
 
     .banner {
       display: none;
-      margin-bottom: 16px;
-      padding: 10px 12px;
-      border-radius: 8px;
-      font-size: 0.88rem;
+      margin-bottom: 14px;
+      padding: 9px 11px;
+      border-radius: var(--radius-sm);
+      font-size: 0.84rem;
       font-weight: 500;
       border: 1px solid transparent;
     }
@@ -156,37 +128,34 @@
     }
 
     .field {
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
 
     label {
       display: block;
-      margin-bottom: 6px;
-      font-size: 0.76rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
+      margin-bottom: 5px;
+      font-size: 0.8rem;
+      font-weight: 500;
       color: var(--text-soft);
     }
 
     input[type="text"],
     input[type="password"] {
       width: 100%;
-      min-height: 46px;
-      padding: 10px 13px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-size: 16px;
+      min-height: 40px;
+      padding: 8px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: 15px;
       color: var(--text);
-      background: #fbfcfd;
-      transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+      background: var(--surface);
+      transition: border-color 0.12s ease;
     }
 
     input:focus {
       outline: none;
-      background: #ffffff;
-      border-color: var(--amber);
-      box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.18);
+      border-color: var(--text);
     }
 
     .password-wrap {
@@ -196,80 +165,77 @@
     }
 
     .password-wrap input {
-      padding-right: 74px;
+      padding-right: 68px;
     }
 
     .toggle-pw {
       position: absolute;
-      right: 6px;
-      min-height: 34px;
-      padding: 0 11px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: #f8fafc;
+      right: 5px;
+      min-height: 30px;
+      padding: 0 9px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
       color: var(--text-soft);
-      font-size: 0.8rem;
-      font-weight: 600;
+      font-family: inherit;
+      font-size: 0.76rem;
+      font-weight: 500;
       cursor: pointer;
     }
 
     .toggle-pw:hover {
-      background: #f1f5f9;
+      background: #f3f4f6;
       color: var(--text);
     }
 
     .submit-btn {
       width: 100%;
-      min-height: 48px;
-      margin-top: 4px;
-      border: 1px solid #0f172a;
-      border-radius: 8px;
+      min-height: 40px;
+      margin-top: 2px;
+      border: 1px solid var(--primary);
+      border-radius: var(--radius-sm);
       background: var(--primary);
       color: #ffffff;
-      font-size: 0.96rem;
-      font-weight: 700;
-      letter-spacing: 0.01em;
+      font-family: inherit;
+      font-size: 0.88rem;
+      font-weight: 600;
       cursor: pointer;
-      transition: background 0.16s ease, transform 0.1s ease;
+      transition: background 0.12s ease;
     }
 
     .submit-btn:hover:not(:disabled) {
       background: var(--primary-hover);
     }
 
-    .submit-btn:active:not(:disabled) {
-      transform: translateY(1px);
-    }
-
     .submit-btn:disabled {
-      opacity: 0.65;
+      opacity: 0.6;
       cursor: not-allowed;
     }
 
-    .auth-footer {
-      margin-top: 16px;
-      text-align: center;
-      font-size: 0.76rem;
-      color: #64748b;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      letter-spacing: 0.04em;
+    @media (max-width: 600px) {
+      input[type="text"],
+      input[type="password"] {
+        font-size: 16px;
+        min-height: 44px;
+      }
+
+      .submit-btn {
+        min-height: 44px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="auth-shell">
     <div class="brand-bar">
-      <div class="brand-mark" aria-hidden="true">ID</div>
-      <div class="brand-copy">
-        <div class="brand-eyebrow">Verification &amp; Licensing</div>
-        <div class="brand-name">ANPR License Control Console</div>
-      </div>
+      <div class="brand-name">ANPR License Admin</div>
+      <div class="brand-scope">Operations Console</div>
     </div>
 
     <main class="card">
       <div class="header">
-        <h1 class="title">Operator Sign In</h1>
-        <p class="subtitle">Authenticate with your SystemOwner or Admin credentials.</p>
+        <h1 class="title">Sign In</h1>
+        <p class="subtitle">Authenticate with your owner or admin credentials.</p>
       </div>
 
       <div id="status-banner" class="banner info" role="status"></div>
@@ -292,8 +258,6 @@
         <button type="submit" id="submit-btn" class="submit-btn">Sign In</button>
       </form>
     </main>
-
-    <div class="auth-footer">BCRYPT AUTHENTICATED &bull; SESSION REVOCABLE</div>
   </div>
 
   <script>
@@ -318,7 +282,7 @@
       } else if (params.get("logged_out") === "1") {
         sessionStorage.removeItem(TOKEN_KEY);
         sessionStorage.removeItem(EXPIRES_KEY);
-        statusBanner.textContent = "You have been signed out cleanly.";
+        statusBanner.textContent = "You have been signed out.";
         statusBanner.classList.add("visible");
       }
 

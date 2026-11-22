@@ -1058,3 +1058,31 @@ def test_import_time_init_db_runs_without_name_error(monkeypatch):
     assert db.admin_users[0]["username"] == "test-admin-user"
     assert db.admin_users[0]["role"] == "owner"
     assert db.admin_users[0]["password_hash"].startswith("$2b$")
+
+
+def test_dashboard_uses_flat_enterprise_styling_without_gradients_or_glows(env_client):
+    """Ensure login and dashboard UI avoid gradients, glow keyframes, and text shadows."""
+    client, _ = env_client
+
+    login_html_r = client.get("/admin/login")
+    assert login_html_r.status_code == 200
+
+    login_r = client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
+    )
+    assert login_r.status_code == 200
+
+    dash_html_r = client.get("/admin")
+    assert dash_html_r.status_code == 200
+
+    disallowed_styles = [
+        "radial-gradient",
+        "linear-gradient",
+        "homeGlowBreath",
+        "homeAmbientShift",
+        "text-shadow",
+    ]
+    for body in (login_html_r.text, dash_html_r.text):
+        for pattern in disallowed_styles:
+            assert pattern not in body, f"Disallowed template style found: {pattern}"
