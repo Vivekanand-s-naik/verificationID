@@ -313,6 +313,87 @@
       border-color: #fca5a5;
     }
 
+    .btn-handover {
+      background: var(--amber-bg);
+      border-color: var(--amber-border);
+      color: var(--amber-text);
+    }
+
+    .btn-handover:hover:not(:disabled) {
+      background: #fef3c7;
+      border-color: #f59e0b;
+      color: #78350f;
+    }
+
+    .reset-modal-card {
+      width: 100%;
+      max-width: 470px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--amber);
+      border-radius: var(--radius);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35);
+    }
+
+    .reset-warning-box {
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      background: var(--amber-bg);
+      border: 1px solid var(--amber-border);
+      border-left: 3px solid var(--amber);
+      color: #78350f;
+      font-size: 0.85rem;
+      line-height: 1.48;
+    }
+
+    .reset-preview {
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      font-size: 0.83rem;
+      color: var(--text-soft);
+    }
+
+    .reset-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .audit-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px 14px;
+      padding: 11px 0;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+    }
+
+    .audit-row:first-child {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    .badge-handover {
+      background: var(--amber-bg);
+      color: var(--amber-text);
+      border: 1px solid var(--amber-border);
+    }
+
+    .badge-renew {
+      background: var(--green-bg);
+      color: var(--green-text);
+      border: 1px solid var(--green-border);
+    }
+
     .btn-sm {
       min-height: 30px;
       padding: 4px 10px;

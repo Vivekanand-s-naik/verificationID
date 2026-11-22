@@ -45,8 +45,10 @@ class FakePostgresDB:
         self.submissions: list[dict] = []
         self.sessions: dict[str, dict] = {}
         self.admin_users: list[dict] = []
+        self.audit_log: list[dict] = []
         self._next_sub_id = 1
         self._next_admin_id = 1
+        self._next_audit_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -131,6 +133,15 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
+        if norm.startswith("UPDATE licenses SET status = 'active', plan = %s, expires_at = %s, has_paid_renewal = %s"):
+            plan, exp, has_paid, key = params
+            if key in self.db.licenses:
+                self.db.licenses[key].update(
+                    status="active", plan=plan, expires_at=exp, has_paid_renewal=bool(has_paid)
+                )
+                self.rowcount = 1
+            return
+
         if norm.startswith("UPDATE licenses SET status = 'active', plan = %s"):
             plan, exp, key = params
             if key in self.db.licenses:
@@ -138,6 +149,38 @@ class _FakeCursor:
                     status="active", plan=plan, expires_at=exp, has_paid_renewal=True
                 )
                 self.rowcount = 1
+            return
+
+        if norm.startswith("INSERT INTO license_audit_log"):
+            (
+                lic_key, action, actor,
+                prev_plan, new_plan,
+                prev_exp, new_exp,
+                prev_paid, new_paid,
+                note, created_at,
+            ) = params
+            self.db.audit_log.append({
+                "id": self.db._next_audit_id,
+                "license_key": lic_key,
+                "action": action,
+                "actor": actor,
+                "previous_plan": prev_plan,
+                "new_plan": new_plan,
+                "previous_expires_at": prev_exp,
+                "new_expires_at": new_exp,
+                "previous_has_paid_renewal": prev_paid,
+                "new_has_paid_renewal": new_paid,
+                "note": note,
+                "created_at": created_at,
+            })
+            self.db._next_audit_id += 1
+            self.rowcount = 1
+            return
+
+        if "FROM license_audit_log ORDER BY created_at DESC" in norm:
+            limit = int(params[0]) if params else 50
+            ordered = sorted(self.db.audit_log, key=lambda r: (r["created_at"], r["id"]), reverse=True)
+            self._rows = [dict(r) for r in ordered[:limit]]
             return
 
         if norm.startswith("UPDATE licenses SET status = 'revoked'"):
@@ -1016,6 +1059,119 @@ def test_system_owner_admin_users_seeding_env_independence_and_credential_update
         "/api/v1/admin/account",
         json={"current_password": "SecondaryPass!42", "username": "hijack"},
     ).status_code == 403
+
+
+def test_handover_reset_plan_vs_renew_audit_trail_and_vivek_180d_fresh_trial(env_client):
+    """
+    Verify SystemOwner handover reset (`POST /api/v1/admin/reset-plan`):
+      1. Distinct from `/renew`: discards elapsed/remaining time and sets expires_at = now + plan_days
+      2. Resetting to 'trial' restores `has_paid_renewal = False` so `launch90` becomes eligible again
+      3. Resetting to a paid plan (e.g. 'quarterly') sets `has_paid_renewal = True` and expires_at = now + 90d
+      4. Non-owner 'admin' session is rejected (403); SystemOwner session and X-Admin-Token succeed
+      5. Audit trail (`/api/v1/admin/audit-log`) distinctly tags 'reset_plan' vs 'renew'
+      6. VIVEK-ANPR-0001 reset to fresh 180-day trial reflects 180 days_remaining on Home `/api/v1/admin/summary`
+      7. Dashboard HTML exposes clearly separated "Reset Plan (Handover)" button and confirmation modal
+    """
+    client, db = env_client
+
+    # Sign in as SystemOwner
+    login_r = client.post(
+        "/api/v1/admin/login",
+        json={"username": "test-admin-user", "password": "test-admin-password"},
+    )
+    assert login_r.status_code == 200
+
+    # Simulate VIVEK-ANPR-0001 after dev/testing: partially elapsed paid renewal (200d left, has_paid_renewal=True)
+    now_before = datetime.now(timezone.utc)
+    db.licenses["VIVEK-ANPR-0001"]["plan"] = "annual"
+    db.licenses["VIVEK-ANPR-0001"]["expires_at"] = now_before + timedelta(days=200)
+    db.licenses["VIVEK-ANPR-0001"]["has_paid_renewal"] = True
+
+    # Confirm launch90 is NOT eligible while has_paid_renewal=True
+    p_before = client.get("/api/v1/plans", params={"license_key": "VIVEK-ANPR-0001"}).json()
+    assert p_before["is_first_paid_renewal"] is False
+
+    # 1. Execute handover reset to fresh 180-day trial
+    r_reset = client.post(
+        "/api/v1/admin/reset-plan",
+        params={"license_key": "VIVEK-ANPR-0001", "plan": "trial"},
+    )
+    assert r_reset.status_code == 200
+    body = r_reset.json()
+    assert body["ok"] is True
+    assert body["action"] == "reset_plan"
+    assert body["plan"] == "trial"
+    assert body["days_reset"] == 180
+    assert body["has_paid_renewal"] is False
+
+    # Verify expires_at is EXACTLY ~180 days from NOW (NOT 200 + 180 = 380 days!)
+    new_exp = datetime.fromisoformat(body["expires_at"])
+    delta_sec = (new_exp - datetime.now(timezone.utc)).total_seconds()
+    assert abs(delta_sec - (180 * 86400)) < 15, f"Expected ~180d from now, got {delta_sec / 86400:.4f}d"
+
+    # 2. launch90 eligibility is restored because has_paid_renewal was reset to False!
+    p_after = client.get("/api/v1/plans", params={"license_key": "VIVEK-ANPR-0001"}).json()
+    assert p_after["is_first_paid_renewal"] is True
+
+    # 3. Home summary reflects fresh 180 days_remaining on Free Trial
+    summary = client.get("/api/v1/admin/summary").json()
+    assert summary["overall_state"] == "all_good"
+    assert summary["primary_license"]["license_key"] == "VIVEK-ANPR-0001"
+    assert summary["primary_license"]["plan"] == "trial"
+    assert summary["primary_license"]["days_remaining"] == 180
+
+    # 4. Compare with /renew: renewing adds +30d ON TOP of the 180d (-> ~210d) and sets has_paid_renewal=True
+    r_renew = client.post(
+        "/api/v1/admin/renew",
+        params={"license_key": "VIVEK-ANPR-0001", "plan": "monthly"},
+    )
+    assert r_renew.status_code == 200
+    renew_exp = datetime.fromisoformat(r_renew.json()["expires_at"])
+    assert abs((renew_exp - datetime.now(timezone.utc)).total_seconds() - (210 * 86400)) < 15
+
+    # 5. Resetting to paid plan ('quarterly') discards remaining 210d -> sets ~90d from now & has_paid_renewal=True
+    r_reset_q = client.post(
+        "/api/v1/admin/reset-plan",
+        params={"license_key": "VIVEK-ANPR-0001", "plan": "quarterly"},
+    )
+    assert r_reset_q.status_code == 200
+    assert r_reset_q.json()["has_paid_renewal"] is True
+    q_exp = datetime.fromisoformat(r_reset_q.json()["expires_at"])
+    assert abs((q_exp - datetime.now(timezone.utc)).total_seconds() - (90 * 86400)) < 15
+
+    # 6. Audit log distinguishes 'reset_plan' from 'renew'
+    audit = client.get("/api/v1/admin/audit-log").json()
+    actions = [a["action"] for a in audit]
+    assert actions == ["reset_plan", "renew", "reset_plan"]
+    assert audit[0]["actor"] == "test-admin-user"
+    assert audit[2]["new_has_paid_renewal"] is False
+
+    # 7. Non-owner 'admin' user gets 403 on /api/v1/admin/reset-plan
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": db._next_admin_id,
+        "username": "ops-admin",
+        "password_hash": srv._hash_password("OpsPass!2026"),
+        "email": "ops@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    db._next_admin_id += 1
+    ops_client = TestClient(srv.app)
+    assert ops_client.post(
+        "/api/v1/admin/login", json={"username": "ops-admin", "password": "OpsPass!2026"}
+    ).status_code == 200
+    assert ops_client.post(
+        "/api/v1/admin/reset-plan", params={"license_key": "VIVEK-ANPR-0001", "plan": "trial"}
+    ).status_code == 403
+
+    # 8. Dashboard HTML contains clearly distinct Reset Plan (Handover) UI + confirmation modal
+    dash_html = client.get("/admin").text
+    assert "Reset Plan (Handover)" in dash_html
+    assert "/api/v1/admin/reset-plan" in dash_html
+    assert "reset-plan-modal" in dash_html
+    assert "HANDOVER RESET" in dash_html
 
 
 def test_import_time_init_db_runs_without_name_error(monkeypatch):

@@ -176,6 +176,27 @@ def init_db():
                 ON admin_sessions (expires_at)
             """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS license_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    license_key TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    previous_plan TEXT,
+                    new_plan TEXT,
+                    previous_expires_at TIMESTAMPTZ,
+                    new_expires_at TIMESTAMPTZ,
+                    previous_has_paid_renewal BOOLEAN,
+                    new_has_paid_renewal BOOLEAN,
+                    note TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_license_audit_log_time
+                ON license_audit_log (created_at DESC)
+            """)
+
             _seed_initial_owner_user(cur)
 
 
@@ -462,6 +483,23 @@ def _require_owner_session(request: Request) -> dict:
     return session
 
 
+def _require_owner_or_token(request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
+    """Allow SystemOwner dashboard sessions (role='owner') or server admin token."""
+    token, source = _extract_session_token(request)
+    if source is not None:
+        session = _verify_active_session(token)
+        if session is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
+        _check_admin(_get_admin_token())
+        if (session.get("role") or "").strip().lower() != "owner":
+            raise HTTPException(status_code=403, detail="SystemOwner (owner) privileges are required for plan reset.")
+        return session
+    if x_admin_token is not None:
+        _check_admin(x_admin_token)
+        return {"auth_type": "admin_token", "username": "admin_token", "role": "owner"}
+    raise HTTPException(status_code=401, detail="Authentication required.")
+
+
 def _require_admin_api(request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
     token, source = _extract_session_token(request)
     if source is not None:
@@ -496,7 +534,56 @@ def _detect_image_mime(raw: bytes) -> str | None:
     return None
 
 
-def _apply_renewal(cur, license_key: str, plan: str) -> dict:
+def _record_license_audit(
+    cur,
+    *,
+    license_key: str,
+    action: str,
+    actor: str,
+    previous_plan: str | None = None,
+    new_plan: str | None = None,
+    previous_expires_at: datetime | None = None,
+    new_expires_at: datetime | None = None,
+    previous_has_paid_renewal: bool | None = None,
+    new_has_paid_renewal: bool | None = None,
+    note: str | None = None,
+) -> None:
+    """Persist a structured entry to license_audit_log for renewals, handover resets, and status changes."""
+    cur.execute(
+        """
+        INSERT INTO license_audit_log (
+            license_key, action, actor,
+            previous_plan, new_plan,
+            previous_expires_at, new_expires_at,
+            previous_has_paid_renewal, new_has_paid_renewal,
+            note, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            license_key,
+            action,
+            actor,
+            previous_plan,
+            new_plan,
+            previous_expires_at,
+            new_expires_at,
+            previous_has_paid_renewal,
+            new_has_paid_renewal,
+            note,
+            _utc_now(),
+        ),
+    )
+
+
+def _apply_renewal(
+    cur,
+    license_key: str,
+    plan: str,
+    actor: str = "admin",
+    audit_action: str = "renew",
+    audit_note: str | None = None,
+) -> dict:
     """
     Core renewal logic shared by /api/v1/admin/renew and submission approval.
     Extends expires_at by PLANS[plan]['days'] from max(now, current expires_at).
@@ -518,6 +605,8 @@ def _apply_renewal(cur, license_key: str, plan: str) -> dict:
 
     now = _utc_now()
     current_exp = _as_utc(row.get("expires_at"))
+    prev_plan = (row.get("plan") or "trial").strip().lower()
+    prev_paid = bool(row.get("has_paid_renewal", False))
     base_time = max(now, current_exp) if current_exp is not None else now
     days_to_add = int(PLANS[plan_key]["days"])
     new_expires_at = base_time + timedelta(days=days_to_add)
@@ -534,12 +623,123 @@ def _apply_renewal(cur, license_key: str, plan: str) -> dict:
         (plan_key, new_expires_at, license_key),
     )
 
+    _record_license_audit(
+        cur,
+        license_key=license_key,
+        action=audit_action,
+        actor=actor,
+        previous_plan=prev_plan,
+        new_plan=plan_key,
+        previous_expires_at=current_exp,
+        new_expires_at=new_expires_at,
+        previous_has_paid_renewal=prev_paid,
+        new_has_paid_renewal=True,
+        note=audit_note or f"Extended license by {days_to_add}d ({plan_key})",
+    )
+    logger.info(
+        "[LICENSE %s] actor=%s key=%s plan=%s->%s expires=%s->%s (+%sd)",
+        audit_action.upper(),
+        actor,
+        license_key,
+        prev_plan,
+        plan_key,
+        _iso_utc(current_exp),
+        new_expires_at.isoformat(),
+        days_to_add,
+    )
+
     return {
         "ok": True,
+        "action": audit_action,
         "license_key": license_key,
         "status": "active",
         "plan": plan_key,
         "days_added": days_to_add,
+        "expires_at": new_expires_at.isoformat(),
+    }
+
+
+def _apply_plan_reset(cur, license_key: str, plan: str, actor: str = "owner") -> dict:
+    """
+    Handover / fresh-start plan reset.
+    Unlike _apply_renewal (which extends from max(now, expires_at)), this discards any
+    prior elapsed/remaining time and sets expires_at = now + duration_days.
+    Resetting to 'trial' restores has_paid_renewal = FALSE so first-time launch90
+    eligibility is available again for real customer handover.
+    """
+    plan_key = (plan or "").strip().lower()
+    if plan_key != "trial" and plan_key not in PLANS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid plan '{plan}'. Allowed plans: trial, {', '.join(PLANS.keys())}",
+        )
+
+    cur.execute(
+        "SELECT license_key, status, expires_at, plan, has_paid_renewal FROM licenses WHERE license_key = %s FOR UPDATE",
+        (license_key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Key not found")
+
+    now = _utc_now()
+    prev_exp = _as_utc(row.get("expires_at"))
+    prev_plan = (row.get("plan") or "trial").strip().lower()
+    prev_paid = bool(row.get("has_paid_renewal", False))
+
+    reset_days = TRIAL_DAYS if plan_key == "trial" else int(PLANS[plan_key]["days"])
+    new_expires_at = now + timedelta(days=reset_days)
+    new_has_paid = False if plan_key == "trial" else True
+
+    cur.execute(
+        """
+        UPDATE licenses
+        SET status = 'active',
+            plan = %s,
+            expires_at = %s,
+            has_paid_renewal = %s
+        WHERE license_key = %s
+        """,
+        (plan_key, new_expires_at, new_has_paid, license_key),
+    )
+
+    _record_license_audit(
+        cur,
+        license_key=license_key,
+        action="reset_plan",
+        actor=actor,
+        previous_plan=prev_plan,
+        new_plan=plan_key,
+        previous_expires_at=prev_exp,
+        new_expires_at=new_expires_at,
+        previous_has_paid_renewal=prev_paid,
+        new_has_paid_renewal=new_has_paid,
+        note=f"Handover clock reset: fresh {reset_days}d '{plan_key}' period started from now",
+    )
+    logger.info(
+        "[LICENSE HANDOVER_RESET] actor=%s key=%s plan=%s->%s expires=%s->%s "
+        "days=%s has_paid_renewal=%s->%s",
+        actor,
+        license_key,
+        prev_plan,
+        plan_key,
+        _iso_utc(prev_exp),
+        new_expires_at.isoformat(),
+        reset_days,
+        prev_paid,
+        new_has_paid,
+    )
+
+    return {
+        "ok": True,
+        "action": "reset_plan",
+        "license_key": license_key,
+        "status": "active",
+        "plan": plan_key,
+        "days_reset": reset_days,
+        "has_paid_renewal": new_has_paid,
+        "previous_plan": prev_plan,
+        "previous_expires_at": _iso_utc(prev_exp),
         "expires_at": new_expires_at.isoformat(),
     }
 
@@ -1198,11 +1398,70 @@ def create_license(req: CreateLicenseRequest, _auth: dict = Depends(_require_adm
 def renew_license(
     license_key: str = Query(...),
     plan: str = Query(...),
-    _auth: dict = Depends(_require_admin_api),
+    auth: dict = Depends(_require_admin_api),
 ):
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
     with get_db() as conn:
         with conn.cursor() as cur:
-            return _apply_renewal(cur, license_key.strip(), plan)
+            return _apply_renewal(cur, license_key.strip(), plan, actor=actor, audit_action="renew")
+
+
+@app.post("/api/v1/admin/reset-plan")
+def reset_license_plan(
+    license_key: str = Query(...),
+    plan: str = Query(default="trial"),
+    auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner handover reset: discards any elapsed or remaining period and starts
+    a fresh full plan period (TRIAL_DAYS for 'trial', or PLANS[plan]['days']) from NOW.
+    Restores has_paid_renewal = FALSE when resetting to 'trial' so launch90 stays eligible.
+    Distinct from /renew (which extends on top of remaining time for paying customers).
+    """
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            return _apply_plan_reset(cur, license_key.strip(), plan, actor=actor)
+
+
+@app.get("/api/v1/admin/audit-log")
+def list_license_audit_log(
+    limit: int = Query(default=50, ge=1, le=200),
+    _auth: dict = Depends(_require_admin_api),
+):
+    """Return recent license lifecycle audit entries (distinguishing handover resets from paid renewals)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, license_key, action, actor, previous_plan, new_plan,
+                       previous_expires_at, new_expires_at,
+                       previous_has_paid_renewal, new_has_paid_renewal,
+                       note, created_at
+                FROM license_audit_log
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "license_key": r["license_key"],
+            "action": r["action"],
+            "actor": r["actor"],
+            "previous_plan": r.get("previous_plan"),
+            "new_plan": r.get("new_plan"),
+            "previous_expires_at": _iso_utc(r.get("previous_expires_at")),
+            "new_expires_at": _iso_utc(r.get("new_expires_at")),
+            "previous_has_paid_renewal": r.get("previous_has_paid_renewal"),
+            "new_has_paid_renewal": r.get("new_has_paid_renewal"),
+            "note": r.get("note") or "",
+            "created_at": _iso_utc(r.get("created_at")),
+        }
+        for r in rows
+    ]
 
 
 @app.post("/api/v1/admin/revoke")
@@ -1351,9 +1610,10 @@ def view_payment_submission_image(
 @app.post("/api/v1/admin/payment-submissions/{submission_id}/approve")
 def approve_payment_submission(
     submission_id: int,
-    _auth: dict = Depends(_require_admin_api),
+    auth: dict = Depends(_require_admin_api),
 ):
     """Mark a pending submission approved and automatically apply the plan renewal atomically."""
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1374,7 +1634,14 @@ def approve_payment_submission(
                     detail=f"Submission #{submission_id} is already '{sub['status']}'.",
                 )
 
-            renewal = _apply_renewal(cur, sub["license_key"], sub["claimed_plan"])
+            renewal = _apply_renewal(
+                cur,
+                sub["license_key"],
+                sub["claimed_plan"],
+                actor=actor,
+                audit_action="payment_approved",
+                audit_note=f"Approved payment submission #{submission_id} ({sub['claimed_plan']})",
+            )
             cur.execute(
                 "UPDATE payment_submissions SET status = 'approved' WHERE id = %s",
                 (submission_id,),
