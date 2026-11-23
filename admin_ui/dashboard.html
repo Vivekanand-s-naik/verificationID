@@ -1899,7 +1899,7 @@
             '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(statusLabel) + '</span></td>' +
             '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
             '<td data-label="Expires At" class="tabular">' + escapeHtml(formatDate(lic.expires_at)) + '</td>' +
-            '<td data-label="Device ID"><span class="mono">' + escapeHtml(lic.device_id || "—") + '</span></td>' +
+            '<td data-label="Device ID">' + (lic.device_id ? '<span class="mono">' + escapeHtml(lic.device_id) + '</span>' : '<span style="color:var(--text-muted);">Unbound</span>') + '</td>' +
             '<td data-label="Last Seen" class="tabular">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
             '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
             '<td data-label="Actions">' +
@@ -1914,6 +1914,9 @@
             '</select>' +
             '<button type="button" class="btn btn-primary btn-sm" data-lic-action="renew" title="Extend on top of remaining time">Renew</button>' +
             '</div>' +
+            ((state.session && state.session.is_owner && lic.device_id)
+              ? '<button type="button" class="btn btn-sm" data-lic-action="unbind-device" data-device-id="' + escapeHtml(lic.device_id) + '" title="Clear bound PC fingerprint so this license can be transferred to a replacement computer">Unbind Device</button>'
+              : '') +
             ((state.session && state.session.is_owner)
               ? '<button type="button" class="btn btn-handover btn-sm" data-lic-action="reset-plan" title="Discard elapsed time and start a fresh period from today (handover only)">&#8634; Reset Plan (Handover)</button>'
               : '') +
@@ -2240,8 +2243,12 @@
         }
         root.innerHTML = entries.map(function (ev) {
           const isReset = ev.action === "reset_plan";
-          const badgeCls = isReset ? "badge-handover" : "badge-renew";
-          const badgeTxt = isReset ? "HANDOVER RESET" : (ev.action === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL");
+          const isUnbind = ev.action === "unbind_device";
+          const isBound = ev.action === "device_bound";
+          const badgeCls = isReset ? "badge-handover" : (isUnbind ? "badge-expired" : (isBound ? "badge-active" : "badge-renew"));
+          const badgeTxt = isReset
+            ? "HANDOVER RESET"
+            : (isUnbind ? "DEVICE UNBOUND" : (isBound ? "DEVICE BOUND" : (ev.action === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -2857,6 +2864,12 @@
           }
           url = "/api/v1/admin/renew?license_key=" + encodeURIComponent(licenseKey) +
             "&plan=" + encodeURIComponent(plan);
+        } else if (action === "unbind-device") {
+          const boundDev = btn.dataset.deviceId || "this computer";
+          if (!window.confirm("Unbind device " + boundDev + " from license " + licenseKey + "?\n\nThe next PC that activates this key will lock to it.")) {
+            return;
+          }
+          url = "/api/v1/admin/unbind-device?license_key=" + encodeURIComponent(licenseKey);
         } else if (action === "reset-plan") {
           openResetPlanModal(licenseKey);
           return;

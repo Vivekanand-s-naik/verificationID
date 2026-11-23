@@ -130,6 +130,13 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
+        if norm.startswith("UPDATE licenses SET device_id = NULL WHERE license_key = %s"):
+            key = params[0]
+            if key in self.db.licenses:
+                self.db.licenses[key]["device_id"] = None
+                self.rowcount = 1
+            return
+
         if norm.startswith("UPDATE licenses SET device_id = %s"):
             dev, ver, seen, key = params
             if key in self.db.licenses:
@@ -494,7 +501,7 @@ def env_client(monkeypatch):
     db.licenses["VIVEK-ANPR-0001"] = {
         "license_key": "VIVEK-ANPR-0001",
         "status": "active",
-        "device_id": "dev-old",
+        "device_id": None,
         "app_version": "1.0.0",
         "last_seen": None,
         "note": "existing key",
@@ -1396,6 +1403,10 @@ def test_broadcast_notifications_owner_only_ack_and_deactivate(env_client):
     assert b1.status_code == 200
     b1_id = b1.json()["id"]
 
+    # Provision separate keys for Device B and Device C (1-key = 1-device locking)
+    assert client.post("/api/v1/admin/create", json={"license_key": "LIC-DEV-B", "note": "PC B"}, headers=headers_owner).status_code == 200
+    assert client.post("/api/v1/admin/create", json={"license_key": "LIC-DEV-C", "note": "PC C"}, headers=headers_owner).status_code == 200
+
     # Device A and Device B both receive broadcast #1 on /api/v1/validate
     v_a1 = client.post(
         "/api/v1/validate",
@@ -1419,7 +1430,7 @@ def test_broadcast_notifications_owner_only_ack_and_deactivate(env_client):
 
     v_b1 = client.post(
         "/api/v1/validate",
-        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-B", "app_version": "1.0.0"},
+        json={"license_key": "LIC-DEV-B", "device_id": "device-B", "app_version": "1.0.0"},
     )
     assert [b["id"] for b in v_b1.json()["broadcasts"]] == [b1_id]
 
@@ -1441,7 +1452,7 @@ def test_broadcast_notifications_owner_only_ack_and_deactivate(env_client):
     assert deact.status_code == 200 and deact.json()["active"] is False
     v_c = client.post(
         "/api/v1/validate",
-        json={"license_key": "VIVEK-ANPR-0001", "device_id": "device-C", "app_version": "1.0.0"},
+        json={"license_key": "LIC-DEV-C", "device_id": "device-C", "app_version": "1.0.0"},
     )
     assert [b["id"] for b in v_c.json()["broadcasts"]] == [b1_id]
 
@@ -1524,3 +1535,98 @@ def test_live_editable_subscription_plans_and_launch90_eligibility(env_client):
     admin_plans = client.get("/api/v1/admin/plans", headers=headers_owner).json()
     monthly_row = next(x for x in admin_plans if x["plan_key"] == "monthly")
     assert monthly_row["active"] is False and monthly_row["price_inr"] == 150
+
+
+def test_strict_single_device_binding_mismatch_and_owner_unbind_transfer(env_client):
+    """
+    Verify strict 1-key = 1-PC binding:
+      1. First PC locks the unbound license key to its hardware device_id
+      2. Second PC attempting to reuse the same key gets status='device_mismatch' (no overwrite!)
+      3. Second PC is also rejected (403) from payment-screenshot and broadcast ack for that key
+      4. Non-owner admin gets 403 on /api/v1/admin/unbind-device
+      5. SystemOwner unbinds the device -> audit logged -> PC #2 can now bind & PC #1 gets device_mismatch
+    """
+    client, db = env_client
+    headers_owner = {"X-Admin-Token": "test-admin-secret"}
+
+    assert client.post(
+        "/api/v1/admin/create",
+        json={"license_key": "GATE-PC-001", "note": "Customer Gate 1"},
+        headers=headers_owner,
+    ).status_code == 200
+    assert db.licenses["GATE-PC-001"]["device_id"] is None
+
+    # 1. PC #1 activates and binds permanently
+    v1 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "GATE-PC-001", "device_id": "hw-pc-001", "app_version": "1.0.0"},
+    )
+    assert v1.status_code == 200 and v1.json()["status"] == "active"
+    assert db.licenses["GATE-PC-001"]["device_id"] == "hw-pc-001"
+
+    # 2. PC #2 tries copying the same key -> rejected with device_mismatch, device_id NOT overwritten!
+    v2 = client.post(
+        "/api/v1/validate",
+        json={"license_key": "GATE-PC-001", "device_id": "hw-pc-002", "app_version": "1.0.0"},
+    )
+    assert v2.status_code == 200
+    assert v2.json()["status"] == "device_mismatch"
+    assert "another computer" in (v2.json()["message"] or "").lower()
+    assert db.licenses["GATE-PC-001"]["device_id"] == "hw-pc-001"
+
+    # PC #2 cannot submit payment screenshot for PC #1's bound key
+    pay_r = client.post(
+        "/api/v1/payment-screenshot",
+        data={"license_key": "GATE-PC-001", "device_id": "hw-pc-002", "claimed_plan": "monthly"},
+        files={"image": ("proof.png", PNG_1X1, "image/png")},
+    )
+    assert pay_r.status_code == 403
+
+    # PC #1 continues working seamlessly
+    v1_again = client.post(
+        "/api/v1/validate",
+        json={"license_key": "GATE-PC-001", "device_id": "hw-pc-001", "app_version": "1.0.0"},
+    )
+    assert v1_again.json()["status"] == "active"
+
+    # 3. Non-owner admin cannot unbind a device
+    db.admin_users.append(
+        {
+            "id": 98,
+            "username": "subadmin2",
+            "email": "sub2@example.com",
+            "password_hash": srv._hash_password("SubPass!2026"),
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    sub_login = client.post("/api/v1/admin/login", json={"username": "subadmin2", "password": "SubPass!2026"})
+    assert sub_login.status_code == 200
+    assert client.post("/api/v1/admin/unbind-device", params={"license_key": "GATE-PC-001"}).status_code == 403
+
+    # 4. SystemOwner unbinds device for hardware transfer -> PC #2 binds, PC #1 is now blocked
+    client.cookies.clear()
+    unbind_r = client.post(
+        "/api/v1/admin/unbind-device",
+        params={"license_key": "GATE-PC-001"},
+        headers=headers_owner,
+    )
+    assert unbind_r.status_code == 200
+    assert unbind_r.json()["previous_device_id"] == "hw-pc-001"
+    assert unbind_r.json()["device_id"] is None
+    assert db.licenses["GATE-PC-001"]["device_id"] is None
+    assert any(a["action"] == "unbind_device" and a["license_key"] == "GATE-PC-001" for a in db.audit_log)
+
+    v2_after = client.post(
+        "/api/v1/validate",
+        json={"license_key": "GATE-PC-001", "device_id": "hw-pc-002", "app_version": "1.0.0"},
+    )
+    assert v2_after.json()["status"] == "active"
+    assert db.licenses["GATE-PC-001"]["device_id"] == "hw-pc-002"
+
+    v1_after = client.post(
+        "/api/v1/validate",
+        json={"license_key": "GATE-PC-001", "device_id": "hw-pc-001", "app_version": "1.0.0"},
+    )
+    assert v1_after.json()["status"] == "device_mismatch"

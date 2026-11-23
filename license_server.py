@@ -1039,9 +1039,14 @@ def get_plans(license_key: str | None = Query(default=None)):
 @app.post("/api/v1/validate", response_model=ValidateResponse)
 def validate(req: ValidateRequest):
     now = _utc_now()
+    req_key = (req.license_key or "").strip()
+    req_device_id = (req.device_id or "").strip()
+    if not req_device_id:
+        return ValidateResponse(status="invalid", message="Device identifier is required.")
+
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM licenses WHERE license_key = %s", (req.license_key,))
+            cur.execute("SELECT * FROM licenses WHERE license_key = %s FOR UPDATE", (req_key,))
             row = cur.fetchone()
 
             if row is None:
@@ -1051,23 +1056,66 @@ def validate(req: ValidateRequest):
             plan = (row.get("plan") or "trial").strip().lower()
             expires_at = _as_utc(row.get("expires_at"))
             expires_iso = _iso_utc(expires_at)
+            bound_device = (row.get("device_id") or "").strip()
 
-            cur.execute(
-                "UPDATE licenses SET device_id = %s, app_version = %s, last_seen = %s WHERE license_key = %s",
-                (req.device_id, req.app_version, now, req.license_key),
-            )
-
-            broadcasts = _fetch_unacked_broadcasts(cur, req.device_id)
-
-            # Revoked is an active licensor action and always takes precedence over expiry
+            # Revoked is an active licensor action and always takes precedence
             if status == "revoked":
                 return ValidateResponse(
                     status="revoked",
                     message="This license has been revoked by the licensor.",
                     expires_at=expires_iso,
                     plan=plan,
-                    broadcasts=broadcasts,
+                    broadcasts=[],
                 )
+
+            # Strict 1-License-Key = 1-Device enforcement:
+            # Once bound to a machine's device_id, any different machine is rejected until
+            # the SystemOwner explicitly unbinds/transfers the license in the Admin Dashboard.
+            if bound_device and bound_device != req_device_id:
+                logger.warning(
+                    "[LICENSE DEVICE_MISMATCH] key=%s bound_device=%s attempted_device=%s",
+                    req_key,
+                    bound_device[:12],
+                    req_device_id[:12],
+                )
+                return ValidateResponse(
+                    status="device_mismatch",
+                    message=(
+                        "This license key is already activated on another computer. "
+                        "Use a separate license key for this PC, or contact support to transfer it."
+                    ),
+                    expires_at=expires_iso,
+                    plan=plan,
+                    broadcasts=[],
+                )
+
+            first_bind = not bound_device
+            cur.execute(
+                "UPDATE licenses SET device_id = %s, app_version = %s, last_seen = %s WHERE license_key = %s",
+                (req_device_id, req.app_version, now, req_key),
+            )
+            if first_bind:
+                logger.info(
+                    "[LICENSE DEVICE_BOUND] key=%s device=%s app_version=%s",
+                    req_key,
+                    req_device_id[:12],
+                    req.app_version,
+                )
+                _record_license_audit(
+                    cur,
+                    license_key=req_key,
+                    action="device_bound",
+                    actor="client",
+                    previous_plan=plan,
+                    new_plan=plan,
+                    previous_expires_at=expires_at,
+                    new_expires_at=expires_at,
+                    previous_has_paid_renewal=bool(row.get("has_paid_renewal", False)),
+                    new_has_paid_renewal=bool(row.get("has_paid_renewal", False)),
+                    note=f"Bound license key to device {req_device_id}",
+                )
+
+            broadcasts = _fetch_unacked_broadcasts(cur, req_device_id)
 
             # Check plan / trial expiration timestamp
             if status == "expired" or (expires_at is not None and expires_at <= now):
@@ -1107,9 +1155,13 @@ def acknowledge_broadcast_endpoint(broadcast_id: int, req: BroadcastAckRequest):
     now = _utc_now()
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT license_key FROM licenses WHERE license_key = %s", (key,))
-            if cur.fetchone() is None:
+            cur.execute("SELECT license_key, device_id FROM licenses WHERE license_key = %s", (key,))
+            lic_row = cur.fetchone()
+            if lic_row is None:
                 raise HTTPException(status_code=404, detail="License key not recognized.")
+            bound_dev = (lic_row.get("device_id") or "").strip()
+            if bound_dev and bound_dev != dev:
+                raise HTTPException(status_code=403, detail="This license key is bound to another computer.")
             cur.execute("SELECT id FROM broadcast_messages WHERE id = %s", (broadcast_id,))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Broadcast message not found.")
@@ -1164,12 +1216,19 @@ async def submit_payment_screenshot(
             claimed_plan_meta = active_plans[plan_key]
 
             cur.execute(
-                "SELECT license_key, status, plan, has_paid_renewal FROM licenses WHERE license_key = %s",
+                "SELECT license_key, status, plan, has_paid_renewal, device_id FROM licenses WHERE license_key = %s",
                 (key,),
             )
             lic_row = cur.fetchone()
             if lic_row is None:
                 raise HTTPException(status_code=404, detail="License key not recognized.")
+
+            bound_dev = (lic_row.get("device_id") or "").strip()
+            if bound_dev and bound_dev != dev:
+                raise HTTPException(
+                    status_code=403,
+                    detail="This license key is already activated on another computer and cannot be renewed from this device.",
+                )
 
             if (lic_row.get("status") or "").strip().lower() == "revoked":
                 raise HTTPException(
@@ -1645,6 +1704,55 @@ def reset_license_plan(
     with get_db() as conn:
         with conn.cursor() as cur:
             return _apply_plan_reset(cur, license_key.strip(), plan, actor=actor)
+
+
+@app.post("/api/v1/admin/unbind-device")
+def unbind_license_device(
+    license_key: str = Query(...),
+    auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner device transfer action: clears the bound device_id on a license key
+    so it can be activated on a replacement computer. The previous computer will be
+    blocked on its next check once the new computer binds the key.
+    """
+    key = license_key.strip()
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT license_key, device_id, plan, expires_at, has_paid_renewal FROM licenses WHERE license_key = %s FOR UPDATE",
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Key not found")
+            prev_device = (row.get("device_id") or "").strip() or None
+            cur.execute("UPDATE licenses SET device_id = NULL WHERE license_key = %s", (key,))
+            plan = (row.get("plan") or "trial").strip().lower()
+            exp = _as_utc(row.get("expires_at"))
+            has_paid = bool(row.get("has_paid_renewal", False))
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="unbind_device",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=f"Unbound device {prev_device or 'none'} to allow transfer to another PC",
+            )
+            logger.info("[LICENSE UNBIND_DEVICE] actor=%s key=%s previous_device=%s", actor, key, prev_device)
+    return {
+        "ok": True,
+        "action": "unbind_device",
+        "license_key": key,
+        "previous_device_id": prev_device,
+        "device_id": None,
+    }
 
 
 @app.get("/api/v1/admin/audit-log")
