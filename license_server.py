@@ -1,21 +1,27 @@
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import math
 import os
 import re
 import secrets
+import smtplib
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 import bcrypt
 import psycopg2
 import psycopg2.extras
 import requests
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -27,6 +33,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")  # set on Render — Neon Postgres
 ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN")
 
 TRIAL_DAYS = 180
+OFFLINE_LEASE_GRACE_HOURS = 72
 SCREENSHOT_RATE_LIMIT_MINUTES = 10
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024  # 5 MB
 
@@ -36,6 +43,14 @@ SESSION_TTL_SECONDS = int(os.environ.get("ADMIN_SESSION_TTL_SECONDS", str(4 * 36
 LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 10
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 _LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+UNKNOWN_KEY_RATE_LIMIT_MAX = 30
+UNKNOWN_KEY_RATE_LIMIT_WINDOW_SECONDS = 5 * 60
+_UNKNOWN_KEY_ATTEMPTS: dict[str, list[float]] = {}
+EMAIL_RELAY_RATE_LIMIT_MAX = 5
+EMAIL_RELAY_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
+_EMAIL_RELAY_ATTEMPTS: dict[str, list[float]] = {}
+_KEY_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+_RESET_CODE_RE = re.compile(r"^[A-Za-z0-9-]{4,16}$")
 ADMIN_PAGE_CSP = (
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
@@ -80,7 +95,10 @@ def get_db():
     db_url = os.environ.get("DATABASE_URL") or DATABASE_URL
     if not db_url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
-    conn = psycopg2.connect(db_url, sslmode="require")
+    connect_kwargs = {}
+    if "sslmode=" not in db_url.lower():
+        connect_kwargs["sslmode"] = "require"
+    conn = psycopg2.connect(db_url, **connect_kwargs)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     try:
         yield conn
@@ -105,15 +123,21 @@ def init_db():
                     note TEXT,
                     expires_at TIMESTAMPTZ,
                     plan TEXT NOT NULL DEFAULT 'trial',
-                    has_paid_renewal BOOLEAN NOT NULL DEFAULT FALSE
+                    has_paid_renewal BOOLEAN NOT NULL DEFAULT FALSE,
+                    activated_at TIMESTAMPTZ,
+                    trial_days INTEGER NOT NULL DEFAULT 180,
+                    allow_repeat_trial BOOLEAN NOT NULL DEFAULT FALSE
                 )
             """)
             # Idempotent column upgrades for existing Neon Postgres databases
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'trial'")
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS has_paid_renewal BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS trial_days INTEGER NOT NULL DEFAULT 180")
+            cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS allow_repeat_trial BOOLEAN NOT NULL DEFAULT FALSE")
 
-            # Backfill NULL plan values on legacy rows
+            # Backfill NULL plan values on legacy rows (preserves all existing expires_at values)
             cur.execute("UPDATE licenses SET plan = 'trial' WHERE plan IS NULL")
 
             # One-time idempotent migration for VIVEK-ANPR-0001 (sets 180-day trial ONLY if expires_at is NULL)
@@ -127,6 +151,36 @@ def init_db():
                 """
             )
 
+            # Persistent server-side device trial consumption history (one free trial per device)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS device_trials (
+                    device_id TEXT PRIMARY KEY,
+                    first_license_key TEXT NOT NULL,
+                    first_activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    note TEXT
+                )
+            """)
+
+            # Backward-compatible backfill for already-bound devices (never mutates existing expires_at)
+            cur.execute("""
+                UPDATE licenses
+                SET activated_at = COALESCE(last_seen, NOW())
+                WHERE device_id IS NOT NULL
+                  AND activated_at IS NULL
+            """)
+            cur.execute("""
+                INSERT INTO device_trials (device_id, first_license_key, first_activated_at, note)
+                SELECT DISTINCT ON (device_id)
+                    device_id,
+                    license_key,
+                    COALESCE(activated_at, last_seen, NOW()),
+                    'Backfilled from existing bound license'
+                FROM licenses
+                WHERE device_id IS NOT NULL
+                ORDER BY device_id, COALESCE(activated_at, last_seen, NOW()) ASC
+                ON CONFLICT (device_id) DO NOTHING
+            """)
+
             # Payment submissions stored as base64 in Postgres (Render free disk is ephemeral)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS payment_submissions (
@@ -136,11 +190,15 @@ def init_db():
                     claimed_plan TEXT NOT NULL,
                     image_data TEXT NOT NULL,
                     content_type TEXT NOT NULL DEFAULT 'image/png',
+                    price_inr INTEGER,
+                    days INTEGER,
                     submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     status TEXT NOT NULL DEFAULT 'pending'
                 )
             """)
             cur.execute("ALTER TABLE payment_submissions ADD COLUMN IF NOT EXISTS content_type TEXT NOT NULL DEFAULT 'image/png'")
+            cur.execute("ALTER TABLE payment_submissions ADD COLUMN IF NOT EXISTS price_inr INTEGER")
+            cur.execute("ALTER TABLE payment_submissions ADD COLUMN IF NOT EXISTS days INTEGER")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_payment_submissions_key_time
                 ON payment_submissions (license_key, submitted_at DESC)
@@ -617,6 +675,201 @@ def _clear_login_failures(ip: str):
     _LOGIN_ATTEMPTS.pop(ip, None)
 
 
+def _generate_secure_license_key() -> str:
+    """Generate a high-entropy (80-bit) license key using OS CSPRNG."""
+    groups = ["".join(secrets.choice(_KEY_ALPHABET) for _ in range(4)) for _ in range(4)]
+    return "ANPR-" + "-".join(groups)
+
+
+def _load_ed25519_private_key() -> Ed25519PrivateKey | None:
+    """
+    Load the Ed25519 offline-lease signing key from LICENSE_SIGNING_PRIVATE_KEY_B64
+    (kept exclusively on the server / Render env vars — NEVER distributed to clients).
+    Accepts either standard base64 of the raw 32-byte Ed25519 private seed or PEM.
+    """
+    raw_b64 = (os.environ.get("LICENSE_SIGNING_PRIVATE_KEY_B64") or "").strip()
+    if not raw_b64:
+        return None
+    try:
+        if raw_b64.startswith("-----BEGIN"):
+            key_obj = serialization.load_pem_private_key(raw_b64.encode("utf-8"), password=None)
+            if isinstance(key_obj, Ed25519PrivateKey):
+                return key_obj
+            return None
+        raw_bytes = base64.b64decode(raw_b64)
+        if len(raw_bytes) == 32:
+            return Ed25519PrivateKey.from_private_bytes(raw_bytes)
+        key_obj = serialization.load_der_private_key(raw_bytes, password=None)
+        if isinstance(key_obj, Ed25519PrivateKey):
+            return key_obj
+    except Exception as exc:
+        logger.error("Failed to load LICENSE_SIGNING_PRIVATE_KEY_B64: %s", exc)
+    return None
+
+
+def _sign_offline_lease(
+    *,
+    license_key: str,
+    device_id: str,
+    plan: str,
+    expires_at: datetime | None,
+    issued_at: datetime,
+    grace_hours: float = OFFLINE_LEASE_GRACE_HOURS,
+) -> dict | None:
+    """
+    Create an Ed25519-signed offline lease token bound to this exact device_id,
+    license_key SHA-256 hash, plan, subscription expiry, issue timestamp, and
+    offline grace expiry (capped at min(issued_at + grace_hours, expires_at)).
+    """
+    priv = _load_ed25519_private_key()
+    if priv is None:
+        logger.warning(
+            "LICENSE_SIGNING_PRIVATE_KEY_B64 is not configured; returning active response without offline_lease."
+        )
+        return None
+
+    issued_utc = _as_utc(issued_at) or _utc_now()
+    issued_epoch = int(issued_utc.timestamp())
+    exp_utc = _as_utc(expires_at)
+    exp_epoch = int(exp_utc.timestamp()) if exp_utc is not None else None
+    grace_cap = issued_epoch + int(max(1.0, float(grace_hours)) * 3600)
+    grace_until_epoch = min(grace_cap, exp_epoch) if exp_epoch is not None else grace_cap
+    grace_until_utc = datetime.fromtimestamp(grace_until_epoch, tz=timezone.utc)
+
+    claims = {
+        "v": 1,
+        "device_id": device_id,
+        "license_key_sha256": hashlib.sha256(license_key.strip().encode("utf-8")).hexdigest(),
+        "plan": plan,
+        "expires_at": exp_utc.isoformat() if exp_utc is not None else None,
+        "expires_at_epoch": exp_epoch,
+        "issued_at": issued_utc.isoformat(),
+        "issued_at_epoch": issued_epoch,
+        "grace_until": grace_until_utc.isoformat(),
+        "grace_until_epoch": grace_until_epoch,
+    }
+    payload_bytes = json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sig_bytes = priv.sign(payload_bytes)
+    return {
+        "alg": "Ed25519",
+        "payload_b64": base64.b64encode(payload_bytes).decode("ascii"),
+        "signature_b64": base64.b64encode(sig_bytes).decode("ascii"),
+    }
+
+
+def _record_and_check_unknown_key_rate_limit(ip: str) -> None:
+    """Rate-limit brute-force enumeration of unknown/invalid license keys per client IP."""
+    now_ts = time.monotonic()
+    cutoff = now_ts - UNKNOWN_KEY_RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in _UNKNOWN_KEY_ATTEMPTS.get(ip, []) if ts > cutoff]
+    recent.append(now_ts)
+    _UNKNOWN_KEY_ATTEMPTS[ip] = recent
+    if len(recent) > UNKNOWN_KEY_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many invalid license validation attempts. Please try again later.",
+        )
+
+
+def _check_and_record_email_relay_rate_limit(license_key: str) -> None:
+    """Rate-limit server-side password-reset email relay per activated license key."""
+    now_ts = time.monotonic()
+    cutoff = now_ts - EMAIL_RELAY_RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in _EMAIL_RELAY_ATTEMPTS.get(license_key, []) if ts > cutoff]
+    if len(recent) >= EMAIL_RELAY_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many password reset emails sent recently. Please wait before trying again.",
+        )
+    recent.append(now_ts)
+    _EMAIL_RELAY_ATTEMPTS[license_key] = recent
+
+
+def _send_password_reset_smtp(
+    *,
+    to_email: str,
+    username: str,
+    reset_code: str,
+    ttl_minutes: int,
+) -> None:
+    """
+    Send password-reset verification code via server-only SMTP credentials
+    (SMTP_HOST, SMTP_PORT, SMTP_USE_TLS, SMTP_EMAIL, SMTP_APP_PASSWORD).
+    Never logs credentials or reset codes.
+    """
+    host = (os.environ.get("SMTP_HOST") or "smtp.gmail.com").strip()
+    port = int(os.environ.get("SMTP_PORT") or "587")
+    use_tls = (os.environ.get("SMTP_USE_TLS") or "true").strip().lower() not in ("0", "false", "no")
+    smtp_email = (os.environ.get("SMTP_EMAIL") or "").strip()
+    smtp_password = "".join((os.environ.get("SMTP_APP_PASSWORD") or "").split())
+    timeout = float(os.environ.get("SMTP_TIMEOUT_SECONDS") or "15")
+    support_contact = (os.environ.get("LICENSE_SUPPORT_CONTACT") or "").strip() or "vivekanandnaik333@gmail.com"
+
+    is_local_host = host.lower() in ("localhost", "127.0.0.1", "::1")
+    if not is_local_host and (not smtp_email or not smtp_password):
+        raise HTTPException(
+            status_code=503,
+            detail="Password reset email service is not configured on the licensing server.",
+        )
+
+    from_addr = smtp_email or "noreply@anpr.local"
+    plain_body = (
+        f"CodersParadiseSoftwares — ANPR Gate Console\n"
+        f"Password Reset Verification Code\n\n"
+        f"Hello {username},\n\n"
+        f"A password reset was requested for account: {username}\n\n"
+        f"Your 6-digit verification code:\n"
+        f"{reset_code}\n\n"
+        f"This code expires in {ttl_minutes} minutes and can only be used once.\n"
+        f"If you did not request this, you can safely ignore this email.\n\n"
+        f"Contact support: {support_contact}\n"
+    )
+    safe_user = html.escape(str(username))
+    safe_code = html.escape(str(reset_code))
+    safe_support = html.escape(support_contact)
+    html_body = (
+        f"<!DOCTYPE html><html lang='en'><body style='font-family:Segoe UI,Arial,sans-serif;background:#f3f4f6;padding:24px;'>"
+        f"<div style='max-width:540px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;'>"
+        f"<div style='height:4px;background:#f59e0b;'></div>"
+        f"<div style='background:#15171a;color:#f8fafc;padding:20px 24px;'>"
+        f"<div style='font-size:11px;letter-spacing:1.2px;color:#f59e0b;font-weight:700;'>CODERSPARADISESOFTWARES</div>"
+        f"<div style='font-size:18px;font-weight:700;margin-top:4px;'>ANPR Gate Console &mdash; Password Reset</div>"
+        f"</div><div style='padding:24px;color:#111827;'>"
+        f"<p>Hello <strong>{safe_user}</strong>,</p>"
+        f"<p>A password reset was requested for account <strong>{safe_user}</strong>.</p>"
+        f"<div style='background:#f9fafb;border:1px solid #d1d5db;border-left:4px solid #f59e0b;border-radius:6px;padding:16px;text-align:center;margin:18px 0;'>"
+        f"<div style='font-size:11px;letter-spacing:1px;color:#6b7280;font-weight:700;margin-bottom:6px;'>VERIFICATION CODE</div>"
+        f"<div style='font-family:Consolas,monospace;font-size:30px;font-weight:700;letter-spacing:8px;'>{safe_code}</div>"
+        f"</div>"
+        f"<p style='font-size:13px;color:#374151;'>This code expires in <strong>{int(ttl_minutes)} minutes</strong> and can only be used once.</p>"
+        f"<p style='font-size:12px;color:#6b7280;'>If you did not request this, ignore this email or contact {safe_support}.</p>"
+        f"</div></div></body></html>"
+    )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "CodersParadiseSoftwares — ANPR Gate Console Password Reset Code"
+    msg["From"] = f"CodersParadiseSoftwares <{from_addr}>"
+    msg["To"] = to_email
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=timeout) as server:
+            server.ehlo()
+            if smtp_email and smtp_password:
+                server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port, timeout=timeout) as server:
+            server.ehlo()
+            if use_tls:
+                server.starttls()
+                server.ehlo()
+            if smtp_email and smtp_password:
+                server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+
+
 def _require_admin_session(request: Request) -> dict:
     token, _ = _extract_session_token(request)
     session = _verify_active_session(token)
@@ -754,6 +1007,12 @@ def _apply_renewal(
     row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Key not found")
+
+    if (row.get("status") or "").strip().lower() == "revoked":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot renew or approve payment for a revoked license. SystemOwner must explicitly reactivate it first.",
+        )
 
     now = _utc_now()
     current_exp = _as_utc(row.get("expires_at"))
@@ -957,11 +1216,26 @@ class ValidateRequest(BaseModel):
 
 
 class ValidateResponse(BaseModel):
-    status: str  # "active" | "revoked" | "expired" | "unknown"
+    status: str  # "active" | "revoked" | "expired" | "unknown" | "device_mismatch" | "trial_already_used" | "invalid"
     message: str | None = None
     expires_at: str | None = None
     plan: str | None = None
     broadcasts: list[dict] = []
+    offline_lease: dict | None = None
+
+
+class PasswordResetEmailRelayRequest(BaseModel):
+    license_key: str
+    device_id: str
+    to_email: str
+    username: str
+    reset_code: str
+    ttl_minutes: int = 10
+
+
+class DeviceTrialOverrideRequest(BaseModel):
+    device_id: str
+    note: str | None = None
 
 
 class BroadcastAckRequest(BaseModel):
@@ -990,10 +1264,11 @@ class UpdatePlanRequest(BaseModel):
 
 
 class CreateLicenseRequest(BaseModel):
-    license_key: str
+    license_key: str | None = None
     note: str | None = None
     plan: str = "trial"
     days: int | None = None
+    allow_repeat_trial: bool = False
 
 
 class AdminLoginRequest(BaseModel):
@@ -1037,12 +1312,14 @@ def get_plans(license_key: str | None = Query(default=None)):
 
 
 @app.post("/api/v1/validate", response_model=ValidateResponse)
-def validate(req: ValidateRequest):
+def validate(req: ValidateRequest, request: Request):
     now = _utc_now()
     req_key = (req.license_key or "").strip()
     req_device_id = (req.device_id or "").strip()
     if not req_device_id:
         return ValidateResponse(status="invalid", message="Device identifier is required.")
+
+    client_ip = _client_ip(request)
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1050,13 +1327,18 @@ def validate(req: ValidateRequest):
             row = cur.fetchone()
 
             if row is None:
+                _record_and_check_unknown_key_rate_limit(client_ip)
                 return ValidateResponse(status="unknown", message="License key not recognized.")
 
             status = (row["status"] or "").strip().lower()
             plan = (row.get("plan") or "trial").strip().lower()
+            has_paid = bool(row.get("has_paid_renewal", False))
             expires_at = _as_utc(row.get("expires_at"))
             expires_iso = _iso_utc(expires_at)
             bound_device = (row.get("device_id") or "").strip()
+            allow_repeat_trial = bool(row.get("allow_repeat_trial", False))
+            trial_days = max(1, int(row.get("trial_days") or TRIAL_DAYS))
+            activated_at = _as_utc(row.get("activated_at"))
 
             # Revoked is an active licensor action and always takes precedence
             if status == "revoked":
@@ -1090,16 +1372,72 @@ def validate(req: ValidateRequest):
                 )
 
             first_bind = not bound_device
-            cur.execute(
-                "UPDATE licenses SET device_id = %s, app_version = %s, last_seen = %s WHERE license_key = %s",
-                (req_device_id, req.app_version, now, req_key),
-            )
             if first_bind:
+                # One 180-day free trial per device, starting at first successful activation.
+                if plan == "trial" and not has_paid:
+                    cur.execute(
+                        """
+                        INSERT INTO device_trials (device_id, first_license_key, first_activated_at, note)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (device_id) DO NOTHING
+                        RETURNING device_id
+                        """,
+                        (req_device_id, req_key, now, "First free trial activation"),
+                    )
+                    inserted_trial = cur.fetchone()
+                    if inserted_trial is None:
+                        cur.execute(
+                            """
+                            SELECT device_id, first_license_key, first_activated_at
+                            FROM device_trials
+                            WHERE device_id = %s
+                            """,
+                            (req_device_id,),
+                        )
+                        existing_trial = cur.fetchone()
+                        first_key = (existing_trial or {}).get("first_license_key")
+                        if first_key and first_key != req_key and not allow_repeat_trial:
+                            logger.warning(
+                                "[LICENSE TRIAL_ALREADY_USED] key=%s device=%s first_key=%s",
+                                req_key,
+                                req_device_id[:12],
+                                first_key,
+                            )
+                            return ValidateResponse(
+                                status="trial_already_used",
+                                message=(
+                                    "This computer has already used its one-time 180-day free trial. "
+                                    "Please activate your existing license key or renew with a paid subscription."
+                                ),
+                                expires_at=expires_iso,
+                                plan=plan,
+                                broadcasts=[],
+                            )
+
+                    # Start 180-day trial countdown ONLY on first activation (preserves legacy/transferred expires_at)
+                    if expires_at is None:
+                        expires_at = now + timedelta(days=trial_days)
+                        expires_iso = _iso_utc(expires_at)
+
+                new_activated_at = activated_at or now
+                cur.execute(
+                    """
+                    UPDATE licenses
+                    SET device_id = %s,
+                        app_version = %s,
+                        last_seen = %s,
+                        activated_at = %s,
+                        expires_at = %s
+                    WHERE license_key = %s
+                    """,
+                    (req_device_id, req.app_version, now, new_activated_at, expires_at, req_key),
+                )
                 logger.info(
-                    "[LICENSE DEVICE_BOUND] key=%s device=%s app_version=%s",
+                    "[LICENSE DEVICE_BOUND] key=%s device=%s app_version=%s expires=%s",
                     req_key,
                     req_device_id[:12],
                     req.app_version,
+                    expires_iso,
                 )
                 _record_license_audit(
                     cur,
@@ -1108,11 +1446,16 @@ def validate(req: ValidateRequest):
                     actor="client",
                     previous_plan=plan,
                     new_plan=plan,
-                    previous_expires_at=expires_at,
+                    previous_expires_at=_as_utc(row.get("expires_at")),
                     new_expires_at=expires_at,
-                    previous_has_paid_renewal=bool(row.get("has_paid_renewal", False)),
-                    new_has_paid_renewal=bool(row.get("has_paid_renewal", False)),
-                    note=f"Bound license key to device {req_device_id}",
+                    previous_has_paid_renewal=has_paid,
+                    new_has_paid_renewal=has_paid,
+                    note=f"Bound license key to device {req_device_id}" + (" (repeat trial owner exception)" if allow_repeat_trial else ""),
+                )
+            else:
+                cur.execute(
+                    "UPDATE licenses SET device_id = %s, app_version = %s, last_seen = %s WHERE license_key = %s",
+                    (req_device_id, req.app_version, now, req_key),
                 )
 
             broadcasts = _fetch_unacked_broadcasts(cur, req_device_id)
@@ -1128,11 +1471,19 @@ def validate(req: ValidateRequest):
                 )
 
             if status == "active":
+                offline_lease = _sign_offline_lease(
+                    license_key=req_key,
+                    device_id=req_device_id,
+                    plan=plan,
+                    expires_at=expires_at,
+                    issued_at=now,
+                )
                 return ValidateResponse(
                     status="active",
                     expires_at=expires_iso,
                     plan=plan,
                     broadcasts=broadcasts,
+                    offline_lease=offline_lease,
                 )
 
             return ValidateResponse(
@@ -1142,6 +1493,66 @@ def validate(req: ValidateRequest):
                 plan=plan,
                 broadcasts=broadcasts,
             )
+
+
+@app.post("/api/v1/email/password-reset")
+def relay_password_reset_email(req: PasswordResetEmailRelayRequest):
+    """
+    Server-side privileged password-reset email relay.
+    Keeps SMTP credentials (Gmail App Password) exclusively on the Render server
+    instead of packaging them in customer desktop installations.
+    Requires a valid, non-revoked license key already bound to the caller's device_id.
+    """
+    key = (req.license_key or "").strip()
+    dev = (req.device_id or "").strip()
+    to_email = (req.to_email or "").strip()
+    username = (req.username or "").strip()
+    reset_code = (req.reset_code or "").strip()
+    ttl_minutes = int(req.ttl_minutes or 10)
+
+    if not key or not dev:
+        raise HTTPException(status_code=400, detail="license_key and device_id are required.")
+    if not to_email or "@" not in to_email or "." not in to_email.split("@", 1)[-1]:
+        raise HTTPException(status_code=400, detail="Valid recipient email is required.")
+    if not username or len(username) > 128:
+        raise HTTPException(status_code=400, detail="Valid username is required.")
+    if not _RESET_CODE_RE.match(reset_code):
+        raise HTTPException(status_code=400, detail="Invalid reset code format.")
+    if ttl_minutes < 1 or ttl_minutes > 60:
+        raise HTTPException(status_code=400, detail="ttl_minutes must be between 1 and 60.")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT license_key, status, device_id FROM licenses WHERE license_key = %s",
+                (key,),
+            )
+            lic_row = cur.fetchone()
+
+    if lic_row is None:
+        raise HTTPException(status_code=403, detail="License key not recognized.")
+    if (lic_row.get("status") or "").strip().lower() == "revoked":
+        raise HTTPException(status_code=403, detail="Revoked licenses cannot use the email relay.")
+    bound_dev = (lic_row.get("device_id") or "").strip()
+    if not bound_dev or bound_dev != dev:
+        raise HTTPException(status_code=403, detail="License key is not bound to this computer.")
+
+    _check_and_record_email_relay_rate_limit(key)
+    try:
+        _send_password_reset_smtp(
+            to_email=to_email,
+            username=username,
+            reset_code=reset_code,
+            ttl_minutes=ttl_minutes,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Password reset SMTP relay failed for key=%s: %s", key, exc)
+        raise HTTPException(status_code=502, detail="Failed to send password reset email.")
+
+    logger.info("[EMAIL RELAY] Sent password reset code for key=%s device=%s", key, dev[:12])
+    return {"ok": True, "relayed": True}
 
 
 @app.post("/api/v1/broadcasts/{broadcast_id}/ack")
@@ -1267,11 +1678,20 @@ async def submit_payment_screenshot(
 
             cur.execute(
                 """
-                INSERT INTO payment_submissions (license_key, device_id, claimed_plan, image_data, content_type, submitted_at, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+                INSERT INTO payment_submissions (license_key, device_id, claimed_plan, image_data, content_type, price_inr, days, submitted_at, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
                 RETURNING id, submitted_at
                 """,
-                (key, dev, plan_key, b64_image, mime_type, now),
+                (
+                    key,
+                    dev,
+                    plan_key,
+                    b64_image,
+                    mime_type,
+                    int(claimed_plan_meta["price_inr"]),
+                    int(claimed_plan_meta["days"]),
+                    now,
+                ),
             )
             inserted = cur.fetchone()
             submission_id = int(inserted["id"])
@@ -1635,8 +2055,16 @@ def admin_dashboard_page(request: Request):
 
 # =============================================================== ADMIN ROUTES
 @app.post("/api/v1/admin/create")
-def create_license(req: CreateLicenseRequest, _auth: dict = Depends(_require_admin_api)):
+def create_license(req: CreateLicenseRequest, auth: dict = Depends(_require_admin_api)):
     plan_key = (req.plan or "trial").strip().lower()
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
+    is_owner = (auth.get("role") or "").strip().lower() == "owner" or auth.get("auth_type") == "admin_token"
+    if req.allow_repeat_trial and not is_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="SystemOwner (owner) privileges are required to authorize a repeat trial exception.",
+        )
+
     with get_db() as conn:
         with conn.cursor() as cur:
             all_plans = _load_plans_map(cur, include_inactive=True)
@@ -1646,33 +2074,124 @@ def create_license(req: CreateLicenseRequest, _auth: dict = Depends(_require_adm
                     detail=f"Invalid plan '{req.plan}'. Use 'trial' or one of: {', '.join(all_plans.keys())}",
                 )
 
-            duration_days = (
+            duration_days = max(
+                1,
                 int(req.days)
                 if req.days is not None
-                else (TRIAL_DAYS if plan_key == "trial" else int(all_plans[plan_key]["days"]))
+                else (TRIAL_DAYS if plan_key == "trial" else int(all_plans[plan_key]["days"])),
             )
-            expires_at = _utc_now() + timedelta(days=max(1, duration_days))
             has_paid = plan_key != "trial"
+            # Free trial countdown starts at FIRST successful device activation (expires_at = NULL until bound).
+            # Paid licenses start immediately upon provisioning.
+            expires_at = None if plan_key == "trial" else (_utc_now() + timedelta(days=duration_days))
+            trial_days = duration_days if plan_key == "trial" else TRIAL_DAYS
 
-            cur.execute(
-                """
-                INSERT INTO licenses (license_key, status, note, plan, expires_at, has_paid_renewal)
-                VALUES (%s, 'active', %s, %s, %s, %s)
-                ON CONFLICT (license_key) DO UPDATE SET
-                    status = 'active',
-                    note = EXCLUDED.note,
-                    plan = EXCLUDED.plan,
-                    expires_at = EXCLUDED.expires_at,
-                    has_paid_renewal = EXCLUDED.has_paid_renewal
-                """,
-                (req.license_key.strip(), req.note, plan_key, expires_at, has_paid),
+            explicit_key = (req.license_key or "").strip()
+            if explicit_key:
+                lic_key = explicit_key
+                cur.execute(
+                    """
+                    INSERT INTO licenses (
+                        license_key, status, note, plan, expires_at,
+                        has_paid_renewal, activated_at, trial_days, allow_repeat_trial
+                    )
+                    VALUES (%s, 'active', %s, %s, %s, %s, NULL, %s, %s)
+                    ON CONFLICT (license_key) DO NOTHING
+                    RETURNING license_key
+                    """,
+                    (lic_key, req.note, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
+                )
+                if cur.fetchone() is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"License key '{lic_key}' already exists. Duplicate keys cannot overwrite existing subscriptions.",
+                    )
+            else:
+                lic_key = ""
+                for _ in range(10):
+                    candidate = _generate_secure_license_key()
+                    cur.execute(
+                        """
+                        INSERT INTO licenses (
+                            license_key, status, note, plan, expires_at,
+                            has_paid_renewal, activated_at, trial_days, allow_repeat_trial
+                        )
+                        VALUES (%s, 'active', %s, %s, %s, %s, NULL, %s, %s)
+                        ON CONFLICT (license_key) DO NOTHING
+                        RETURNING license_key
+                        """,
+                        (candidate, req.note, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
+                    )
+                    if cur.fetchone() is not None:
+                        lic_key = candidate
+                        break
+                if not lic_key:
+                    raise HTTPException(status_code=500, detail="Failed to generate a unique license key.")
+
+            _record_license_audit(
+                cur,
+                license_key=lic_key,
+                action="license_created",
+                actor=actor,
+                previous_plan=None,
+                new_plan=plan_key,
+                previous_expires_at=None,
+                new_expires_at=expires_at,
+                previous_has_paid_renewal=None,
+                new_has_paid_renewal=has_paid,
+                note=(
+                    (req.note or "").strip()
+                    or (f"Created {trial_days}d trial key (starts on activation)" if plan_key == "trial" else f"Created {plan_key} key ({duration_days}d)")
+                ),
             )
+            logger.info("[LICENSE CREATED] actor=%s key=%s plan=%s starts_on_activation=%s", actor, lic_key, plan_key, expires_at is None)
+
     return {
         "ok": True,
-        "license_key": req.license_key.strip(),
+        "license_key": lic_key,
         "status": "active",
         "plan": plan_key,
-        "expires_at": expires_at.isoformat(),
+        "trial_days": trial_days if plan_key == "trial" else None,
+        "expires_at": _iso_utc(expires_at),
+        "starts_on_activation": expires_at is None,
+        "allow_repeat_trial": bool(req.allow_repeat_trial),
+    }
+
+
+@app.post("/api/v1/admin/device-trials/override")
+def override_device_trial_history(
+    req: DeviceTrialOverrideRequest,
+    auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner-only exception mechanism: clear a device's prior trial record so an
+    authorized replacement or recovery installation may start a fresh trial.
+    """
+    dev = (req.device_id or "").strip()
+    if not dev:
+        raise HTTPException(status_code=400, detail="device_id is required.")
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT device_id, first_license_key FROM device_trials WHERE device_id = %s FOR UPDATE",
+                (dev,),
+            )
+            existing = cur.fetchone()
+            cur.execute("DELETE FROM device_trials WHERE device_id = %s", (dev,))
+            prev_key = (existing or {}).get("first_license_key") or f"DEVICE:{dev[:12]}"
+            _record_license_audit(
+                cur,
+                license_key=str(prev_key),
+                action="trial_override",
+                actor=actor,
+                note=(req.note or "").strip() or f"Owner authorized trial history override for device {dev}",
+            )
+    logger.info("[DEVICE TRIAL OVERRIDE] actor=%s device=%s had_record=%s", actor, dev[:12], existing is not None)
+    return {
+        "ok": True,
+        "device_id": dev,
+        "cleared": existing is not None,
     }
 
 
@@ -1796,23 +2315,72 @@ def list_license_audit_log(
 
 
 @app.post("/api/v1/admin/revoke")
-def revoke_license(license_key: str, _auth: dict = Depends(_require_admin_api)):
+def revoke_license(license_key: str, auth: dict = Depends(_require_admin_api)):
+    key = license_key.strip()
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE licenses SET status = 'revoked' WHERE license_key = %s", (license_key,))
-            if cur.rowcount == 0:
+            cur.execute(
+                "SELECT license_key, status, plan, expires_at, has_paid_renewal FROM licenses WHERE license_key = %s FOR UPDATE",
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
                 raise HTTPException(status_code=404, detail="Key not found")
-    return {"ok": True, "license_key": license_key, "status": "revoked"}
+            cur.execute("UPDATE licenses SET status = 'revoked' WHERE license_key = %s", (key,))
+            plan = (row.get("plan") or "trial").strip().lower()
+            exp = _as_utc(row.get("expires_at"))
+            has_paid = bool(row.get("has_paid_renewal", False))
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="revoked",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=f"Revoked license (previous status={row.get('status')})",
+            )
+            logger.info("[LICENSE REVOKED] actor=%s key=%s", actor, key)
+    return {"ok": True, "license_key": key, "status": "revoked"}
 
 
 @app.post("/api/v1/admin/reactivate")
-def reactivate_license(license_key: str, _auth: dict = Depends(_require_admin_api)):
+def reactivate_license(license_key: str, auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only explicit reactivation of a revoked license (required before any renewal)."""
+    key = license_key.strip()
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE licenses SET status = 'active' WHERE license_key = %s", (license_key,))
-            if cur.rowcount == 0:
+            cur.execute(
+                "SELECT license_key, status, plan, expires_at, has_paid_renewal FROM licenses WHERE license_key = %s FOR UPDATE",
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
                 raise HTTPException(status_code=404, detail="Key not found")
-    return {"ok": True, "license_key": license_key, "status": "active"}
+            cur.execute("UPDATE licenses SET status = 'active' WHERE license_key = %s", (key,))
+            plan = (row.get("plan") or "trial").strip().lower()
+            exp = _as_utc(row.get("expires_at"))
+            has_paid = bool(row.get("has_paid_renewal", False))
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="reactivated",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=f"Owner reactivated license (previous status={row.get('status')})",
+            )
+            logger.info("[LICENSE REACTIVATED] actor=%s key=%s", actor, key)
+    return {"ok": True, "license_key": key, "status": "active"}
 
 
 @app.post("/api/v1/admin/expire")
@@ -1854,7 +2422,8 @@ def list_licenses(_auth: dict = Depends(_require_admin_api)):
             cur.execute(
                 """
                 SELECT license_key, status, plan, expires_at, has_paid_renewal,
-                       device_id, app_version, last_seen, note
+                       device_id, app_version, last_seen, note,
+                       activated_at, trial_days, allow_repeat_trial
                 FROM licenses
                 ORDER BY license_key ASC
                 """
@@ -1879,7 +2448,7 @@ def list_payment_submissions(
                 cur.execute(
                     """
                     SELECT id, license_key, device_id, claimed_plan, image_data,
-                           content_type, submitted_at, status
+                           content_type, price_inr, days, submitted_at, status
                     FROM payment_submissions
                     ORDER BY submitted_at DESC
                     """
@@ -1888,7 +2457,7 @@ def list_payment_submissions(
                 cur.execute(
                     """
                     SELECT id, license_key, device_id, claimed_plan, image_data,
-                           content_type, submitted_at, status
+                           content_type, price_inr, days, submitted_at, status
                     FROM payment_submissions
                     WHERE status = %s
                     ORDER BY submitted_at DESC
@@ -1903,14 +2472,16 @@ def list_payment_submissions(
         plan_meta = all_plans.get(plan_key, {})
         mime = row.get("content_type") or "image/png"
         b64 = row["image_data"]
+        snap_price = row.get("price_inr")
+        snap_days = row.get("days")
         results.append({
             "id": row["id"],
             "license_key": row["license_key"],
             "device_id": row["device_id"],
             "claimed_plan": plan_key,
             "plan_label": plan_meta.get("label", plan_key),
-            "price_inr": plan_meta.get("price_inr"),
-            "days": plan_meta.get("days"),
+            "price_inr": snap_price if snap_price is not None else plan_meta.get("price_inr"),
+            "days": snap_days if snap_days is not None else plan_meta.get("days"),
             "submitted_at": _iso_utc(row["submitted_at"]),
             "status": row["status"],
             "content_type": mime,
@@ -2064,7 +2635,7 @@ def admin_dashboard_summary(
 
             cur.execute(
                 """
-                SELECT id, license_key, claimed_plan, submitted_at, status
+                SELECT id, license_key, claimed_plan, price_inr, days, submitted_at, status
                 FROM payment_submissions
                 ORDER BY submitted_at DESC
                 """
@@ -2160,8 +2731,12 @@ def admin_dashboard_summary(
             sub_dt = _as_utc(sub.get("submitted_at"))
             if sub_dt is not None and sub_dt.year == now.year and sub_dt.month == now.month:
                 counts["approved_payments_this_month"] += 1
-                plan_meta = all_plans.get((sub.get("claimed_plan") or "").strip().lower(), {})
-                counts["revenue_this_month_inr"] += int(plan_meta.get("price_inr") or 0)
+                snap_price = sub.get("price_inr")
+                if snap_price is not None:
+                    counts["revenue_this_month_inr"] += int(snap_price)
+                else:
+                    plan_meta = all_plans.get((sub.get("claimed_plan") or "").strip().lower(), {})
+                    counts["revenue_this_month_inr"] += int(plan_meta.get("price_inr") or 0)
 
     if counts["pending_payments"] > 0:
         n_pend = counts["pending_payments"]

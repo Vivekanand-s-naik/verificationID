@@ -42,6 +42,7 @@ class FakePostgresDB:
 
     def __init__(self):
         self.licenses: dict[str, dict] = {}
+        self.device_trials: dict[str, dict] = {}
         self.submissions: list[dict] = []
         self.sessions: dict[str, dict] = {}
         self.admin_users: list[dict] = []
@@ -105,6 +106,53 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
+        if norm.startswith("UPDATE licenses SET activated_at = COALESCE(last_seen, NOW()) WHERE device_id IS NOT NULL"):
+            for row in self.db.licenses.values():
+                if row.get("device_id") and row.get("activated_at") is None:
+                    row["activated_at"] = row.get("last_seen") or datetime.now(timezone.utc)
+                    self.rowcount += 1
+            return
+
+        if norm.startswith("INSERT INTO device_trials") and "SELECT DISTINCT ON (device_id)" in norm:
+            for row in self.db.licenses.values():
+                dev = row.get("device_id")
+                if dev and dev not in self.db.device_trials:
+                    self.db.device_trials[dev] = {
+                        "device_id": dev,
+                        "first_license_key": row["license_key"],
+                        "first_activated_at": row.get("activated_at") or row.get("last_seen") or datetime.now(timezone.utc),
+                        "note": "Backfilled from existing bound license",
+                    }
+                    self.rowcount += 1
+            return
+
+        if norm.startswith("INSERT INTO device_trials"):
+            dev, first_key, first_at, note = params
+            if dev not in self.db.device_trials:
+                self.db.device_trials[dev] = {
+                    "device_id": dev,
+                    "first_license_key": first_key,
+                    "first_activated_at": first_at,
+                    "note": note,
+                }
+                self._rows = [{"device_id": dev}]
+                self.rowcount = 1
+            else:
+                self._rows = []
+                self.rowcount = 0
+            return
+
+        if "FROM device_trials WHERE device_id = %s" in norm:
+            dt_row = self.db.device_trials.get(params[0])
+            self._rows = [dict(dt_row)] if dt_row else []
+            return
+
+        if norm.startswith("DELETE FROM device_trials WHERE device_id = %s"):
+            if params[0] in self.db.device_trials:
+                del self.db.device_trials[params[0]]
+                self.rowcount = 1
+            return
+
         if norm.startswith("SELECT") and "FROM licenses WHERE license_key = %s" in norm:
             row = self.db.licenses.get(params[0])
             self._rows = [dict(row)] if row else []
@@ -115,7 +163,15 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO licenses"):
-            key, note, plan, exp, has_paid = params
+            if len(params) == 7:
+                key, note, plan, exp, has_paid, trial_days, allow_repeat = params
+            else:
+                key, note, plan, exp, has_paid = params
+                trial_days, allow_repeat = 180, False
+            if "ON CONFLICT (license_key) DO NOTHING" in norm and key in self.db.licenses:
+                self._rows = []
+                self.rowcount = 0
+                return
             self.db.licenses[key] = {
                 "license_key": key,
                 "status": "active",
@@ -126,7 +182,12 @@ class _FakeCursor:
                 "plan": plan,
                 "expires_at": exp,
                 "has_paid_renewal": has_paid,
+                "activated_at": None,
+                "trial_days": trial_days,
+                "allow_repeat_trial": allow_repeat,
             }
+            if "RETURNING license_key" in norm:
+                self._rows = [{"license_key": key}]
             self.rowcount = 1
             return
 
@@ -134,6 +195,19 @@ class _FakeCursor:
             key = params[0]
             if key in self.db.licenses:
                 self.db.licenses[key]["device_id"] = None
+                self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE licenses SET device_id = %s, app_version = %s, last_seen = %s, activated_at = %s, expires_at = %s"):
+            dev, ver, seen, act_at, exp, key = params
+            if key in self.db.licenses:
+                self.db.licenses[key].update(
+                    device_id=dev,
+                    app_version=ver,
+                    last_seen=seen,
+                    activated_at=act_at,
+                    expires_at=exp,
+                )
                 self.rowcount = 1
             return
 
@@ -223,7 +297,11 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO payment_submissions"):
-            key, dev, plan, b64, mime, submitted_at = params
+            if len(params) == 8:
+                key, dev, plan, b64, mime, price_inr, days, submitted_at = params
+            else:
+                key, dev, plan, b64, mime, submitted_at = params
+                price_inr, days = None, None
             sub = {
                 "id": self.db._next_sub_id,
                 "license_key": key,
@@ -231,6 +309,8 @@ class _FakeCursor:
                 "claimed_plan": plan,
                 "image_data": b64,
                 "content_type": mime,
+                "price_inr": price_inr,
+                "days": days,
                 "submitted_at": submitted_at,
                 "status": "pending",
             }
@@ -539,16 +619,20 @@ def test_create_license_defaults_to_180_day_trial_and_validate_returns_plan_expi
     assert r.status_code == 200
     body = r.json()
     assert body["plan"] == "trial"
-    exp = datetime.fromisoformat(body["expires_at"])
-    assert 179 <= (exp - datetime.now(timezone.utc)).days <= 180
+    # 180-day free trial starts at FIRST successful device activation (NULL expires_at before activation)
+    assert body["expires_at"] is None
+    assert body["starts_on_activation"] is True
+    assert body["trial_days"] == 180
 
-    # Validate active trial
+    # First activation starts the 180-day countdown immediately
     v = client.post("/api/v1/validate", json={"license_key": "NEW-USER-001", "device_id": "abc", "app_version": "1.0.0"})
     assert v.status_code == 200
     vb = v.json()
     assert vb["status"] == "active"
     assert vb["plan"] == "trial"
     assert vb["expires_at"] is not None
+    exp = datetime.fromisoformat(vb["expires_at"])
+    assert 179 <= (exp - datetime.now(timezone.utc)).days <= 180
 
 
 def test_validate_distinguishes_expired_vs_revoked(env_client):
@@ -1630,3 +1714,177 @@ def test_strict_single_device_binding_mismatch_and_owner_unbind_transfer(env_cli
         json={"license_key": "GATE-PC-001", "device_id": "hw-pc-001", "app_version": "1.0.0"},
     )
     assert v1_after.json()["status"] == "device_mismatch"
+
+
+
+def test_one_free_trial_per_device_owner_override_and_reinstall_persistence(env_client):
+    """
+    Verify Part D trial lifecycle:
+      1. Trial countdown starts on first successful activation (NULL expires_at before activation).
+      2. Reinstall (re-validating the same key on the same device) preserves original expires_at.
+      3. Creating another trial key does NOT grant a second trial to the same device (`trial_already_used`).
+      4. Owner exception (`allow_repeat_trial=True` or `/api/v1/admin/device-trials/override`) works cleanly.
+    """
+    client, db = env_client
+
+    c1 = client.post("/api/v1/admin/create", json={"note": "Customer PC 1"}, headers=ADMIN_HDR)
+    assert c1.status_code == 200
+    k1 = c1.json()["license_key"]
+    assert k1.startswith("ANPR-") and len(k1) == 24
+    assert c1.json()["expires_at"] is None
+
+    v1 = client.post("/api/v1/validate", json={"license_key": k1, "device_id": "pc-trial-01", "app_version": "1.0.0"})
+    assert v1.status_code == 200 and v1.json()["status"] == "active"
+    orig_exp = v1.json()["expires_at"]
+    assert orig_exp is not None
+
+    # Simulate uninstall/reinstall re-validating same key on same device -> exact original expiry preserved!
+    v1_re = client.post("/api/v1/validate", json={"license_key": k1, "device_id": "pc-trial-01", "app_version": "1.0.0"})
+    assert v1_re.json()["status"] == "active"
+    assert v1_re.json()["expires_at"] == orig_exp
+
+    # Issue second trial key -> MUST be rejected for pc-trial-01!
+    c2 = client.post("/api/v1/admin/create", json={"note": "Second trial attempt"}, headers=ADMIN_HDR)
+    k2 = c2.json()["license_key"]
+    v2 = client.post("/api/v1/validate", json={"license_key": k2, "device_id": "pc-trial-01", "app_version": "1.0.0"})
+    assert v2.status_code == 200
+    assert v2.json()["status"] == "trial_already_used"
+    assert db.licenses[k2]["device_id"] is None
+    assert db.licenses[k2]["expires_at"] is None
+
+    # Paid plan key on the same device is allowed even after trial was consumed
+    c_paid = client.post("/api/v1/admin/create", json={"plan": "monthly", "note": "Paid"}, headers=ADMIN_HDR)
+    k_paid = c_paid.json()["license_key"]
+    v_paid = client.post("/api/v1/validate", json={"license_key": k_paid, "device_id": "pc-trial-01", "app_version": "1.0.0"})
+    assert v_paid.json()["status"] == "active" and v_paid.json()["plan"] == "monthly"
+
+    # Owner override clears device_trials record and allows k2 to activate cleanly
+    ov = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": "pc-trial-01", "note": "Owner approved RMA replacement"},
+        headers=ADMIN_HDR,
+    )
+    assert ov.status_code == 200 and ov.json()["cleared"] is True
+    v2_after = client.post("/api/v1/validate", json={"license_key": k2, "device_id": "pc-trial-01", "app_version": "1.0.0"})
+    assert v2_after.json()["status"] == "active"
+    assert any(a["action"] == "trial_override" for a in db.audit_log)
+
+
+def test_duplicate_key_409_revoked_payment_guard_owner_reactivation_and_price_snapshot(env_client):
+    """Verify Part E safeguards and payment price snapshot accuracy."""
+    client, db = env_client
+
+    # 1. Duplicate key rejected with 409 Conflict (never overwrites!)
+    r1 = client.post("/api/v1/admin/create", json={"license_key": "NO-DUP-001", "note": "First"}, headers=ADMIN_HDR)
+    assert r1.status_code == 200
+    r2 = client.post("/api/v1/admin/create", json={"license_key": "NO-DUP-001", "note": "Overwrite"}, headers=ADMIN_HDR)
+    assert r2.status_code == 409
+    assert db.licenses["NO-DUP-001"]["note"] == "First"
+    assert any(a["action"] == "license_created" and a["license_key"] == "NO-DUP-001" for a in db.audit_log)
+
+    # Activate and submit a quarterly payment (snapshot price_inr = 300)
+    client.post("/api/v1/validate", json={"license_key": "NO-DUP-001", "device_id": "dev-dup-1", "app_version": "1.0.0"})
+    up = client.post(
+        "/api/v1/payment-screenshot",
+        data={"license_key": "NO-DUP-001", "device_id": "dev-dup-1", "claimed_plan": "quarterly"},
+        files={"image": ("proof.png", PNG_1X1, "image/png")},
+    )
+    assert up.status_code == 200
+    sub_id = up.json()["submission_id"]
+
+    # Edit quarterly plan price live to ₹500 BEFORE approval -> historical submission snapshot MUST stay ₹300!
+    assert client.put("/api/v1/admin/plans/quarterly", json={"price_inr": 500}, headers=ADMIN_HDR).status_code == 200
+
+    # Revoke license -> audit logged -> approving old pending payment MUST fail with 409!
+    assert client.post("/api/v1/admin/revoke", params={"license_key": "NO-DUP-001"}, headers=ADMIN_HDR).status_code == 200
+    assert any(a["action"] == "revoked" and a["license_key"] == "NO-DUP-001" for a in db.audit_log)
+    assert client.post(f"/api/v1/admin/payment-submissions/{sub_id}/approve", headers=ADMIN_HDR).status_code == 409
+    assert client.post("/api/v1/admin/renew", params={"license_key": "NO-DUP-001", "plan": "monthly"}, headers=ADMIN_HDR).status_code == 409
+
+    # Non-owner admin cannot reactivate a revoked license (403)
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 77,
+        "username": "staff-no-reactivate",
+        "password_hash": srv._hash_password("StaffPass!77"),
+        "email": "s@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_login = client.post("/api/v1/admin/login", json={"username": "staff-no-reactivate", "password": "StaffPass!77"})
+    st_hdr = {"Authorization": f"Bearer {st_login.json()['token']}"}
+    assert client.post("/api/v1/admin/reactivate", params={"license_key": "NO-DUP-001"}, headers=st_hdr).status_code == 403
+    client.cookies.clear()
+
+    # Owner reactivates -> audit logged -> approval now succeeds & preserves device_id & uses snapshotted ₹300!
+    assert client.post("/api/v1/admin/reactivate", params={"license_key": "NO-DUP-001"}, headers=ADMIN_HDR).status_code == 200
+    assert any(a["action"] == "reactivated" and a["license_key"] == "NO-DUP-001" for a in db.audit_log)
+    assert client.post(f"/api/v1/admin/payment-submissions/{sub_id}/approve", headers=ADMIN_HDR).status_code == 200
+    assert db.licenses["NO-DUP-001"]["device_id"] == "dev-dup-1"
+
+    summary = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    assert summary["counts"]["revenue_this_month_inr"] == 300
+
+
+def test_ed25519_offline_lease_and_server_password_reset_email_relay(env_client, monkeypatch):
+    """Verify Ed25519 signed offline lease claims & authenticated server-side password-reset email relay."""
+    import json as _json
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    client, _db = env_client
+    priv = Ed25519PrivateKey.generate()
+    priv_b64 = base64.b64encode(
+        priv.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    ).decode("ascii")
+    pub = priv.public_key()
+    monkeypatch.setenv("LICENSE_SIGNING_PRIVATE_KEY_B64", priv_b64)
+    srv._EMAIL_RELAY_ATTEMPTS.clear()
+
+    v = client.post("/api/v1/validate", json={"license_key": "VIVEK-ANPR-0001", "device_id": "relay-dev-1", "app_version": "1.0.0"})
+    assert v.status_code == 200
+    lease = v.json()["offline_lease"]
+    assert lease is not None and lease["alg"] == "Ed25519"
+    payload_bytes = base64.b64decode(lease["payload_b64"])
+    sig_bytes = base64.b64decode(lease["signature_b64"])
+    pub.verify(sig_bytes, payload_bytes)
+    claims = _json.loads(payload_bytes.decode("utf-8"))
+    assert claims["device_id"] == "relay-dev-1"
+    assert claims["plan"] == "trial"
+    assert claims["grace_until_epoch"] <= claims["issued_at_epoch"] + 72 * 3600
+
+    # Email relay rejects unbound/wrong device (403)
+    bad_dev = client.post(
+        "/api/v1/email/password-reset",
+        json={
+            "license_key": "VIVEK-ANPR-0001",
+            "device_id": "wrong-device",
+            "to_email": "ops@example.com",
+            "username": "admin",
+            "reset_code": "123456",
+            "ttl_minutes": 15,
+        },
+    )
+    assert bad_dev.status_code == 403
+
+    # Bound device relays successfully via server-only SMTP helper
+    sent = []
+    with patch.object(srv, "_send_password_reset_smtp", side_effect=lambda **kw: sent.append(kw)):
+        ok_relay = client.post(
+            "/api/v1/email/password-reset",
+            json={
+                "license_key": "VIVEK-ANPR-0001",
+                "device_id": "relay-dev-1",
+                "to_email": "ops@example.com",
+                "username": "admin",
+                "reset_code": "654321",
+                "ttl_minutes": 15,
+            },
+        )
+    assert ok_relay.status_code == 200 and ok_relay.json()["relayed"] is True
+    assert len(sent) == 1 and sent[0]["to_email"] == "ops@example.com"

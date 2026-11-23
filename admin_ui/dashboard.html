@@ -1396,13 +1396,13 @@
         <div class="card-head">
           <div>
             <h2 class="card-title">Create New License</h2>
-            <p class="card-subtitle">Issue a 180-day trial key or update an existing key note.</p>
+            <p class="card-subtitle">Issue a 180-day trial key (starts on first device activation). Leave key blank to auto-generate a secure key.</p>
           </div>
         </div>
         <form id="create-license-form" class="form-grid">
           <div class="field">
-            <label for="new-license-key">License Key</label>
-            <input id="new-license-key" type="text" placeholder="e.g. VIVEK-ANPR-0002" required />
+            <label for="new-license-key">License Key (optional — auto-generated if blank)</label>
+            <input id="new-license-key" type="text" placeholder="Leave blank for secure random key" />
           </div>
           <div class="field">
             <label for="new-license-note">Note (optional)</label>
@@ -1893,12 +1893,15 @@
           const statusLabel = eff.charAt(0).toUpperCase() + eff.slice(1);
           const defaultPlan = state.plans && state.plans[lic.plan] ? lic.plan : "monthly";
           const isRevoked = (lic.status || "").toLowerCase() === "revoked";
+          const expiresCell = (!lic.expires_at && (lic.plan || "trial").toLowerCase() === "trial")
+            ? '<span style="color:var(--text-muted);">Starts on activation (' + escapeHtml(lic.trial_days || 180) + 'd)</span>'
+            : escapeHtml(formatDate(lic.expires_at));
           return (
             '<tr data-license-key="' + escapeHtml(lic.license_key) + '">' +
             '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
             '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(statusLabel) + '</span></td>' +
             '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
-            '<td data-label="Expires At" class="tabular">' + escapeHtml(formatDate(lic.expires_at)) + '</td>' +
+            '<td data-label="Expires At" class="tabular">' + expiresCell + '</td>' +
             '<td data-label="Device ID">' + (lic.device_id ? '<span class="mono">' + escapeHtml(lic.device_id) + '</span>' : '<span style="color:var(--text-muted);">Unbound</span>') + '</td>' +
             '<td data-label="Last Seen" class="tabular">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
             '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
@@ -2242,13 +2245,36 @@
           return;
         }
         root.innerHTML = entries.map(function (ev) {
-          const isReset = ev.action === "reset_plan";
-          const isUnbind = ev.action === "unbind_device";
-          const isBound = ev.action === "device_bound";
-          const badgeCls = isReset ? "badge-handover" : (isUnbind ? "badge-expired" : (isBound ? "badge-active" : "badge-renew"));
+          const act = (ev.action || "").toLowerCase();
+          const isReset = act === "reset_plan";
+          const isUnbind = act === "unbind_device";
+          const isBound = act === "device_bound";
+          const isRevoked = act === "revoked";
+          const isReactivated = act === "reactivated";
+          const isCreated = act === "license_created";
+          const isTrialOverride = act === "trial_override";
+          const badgeCls = isReset
+            ? "badge-handover"
+            : (isRevoked
+              ? "badge-revoked"
+              : (isUnbind || isTrialOverride
+                ? "badge-expired"
+                : (isBound || isReactivated || isCreated ? "badge-active" : "badge-renew")));
           const badgeTxt = isReset
             ? "HANDOVER RESET"
-            : (isUnbind ? "DEVICE UNBOUND" : (isBound ? "DEVICE BOUND" : (ev.action === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")));
+            : (isRevoked
+              ? "REVOKED"
+              : (isReactivated
+                ? "REACTIVATED"
+                : (isCreated
+                  ? "CREATED"
+                  : (isTrialOverride
+                    ? "TRIAL OVERRIDE"
+                    : (isUnbind
+                      ? "DEVICE UNBOUND"
+                      : (isBound
+                        ? "DEVICE BOUND"
+                        : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -2765,23 +2791,20 @@
         const btn = document.getElementById("create-license-btn");
         const licenseKey = keyInput.value.trim();
         const note = noteInput.value.trim();
-        if (!licenseKey) {
-          showToast("License key is required.", "error");
-          return;
-        }
 
         btn.disabled = true;
         try {
-          await apiFetch("/api/v1/admin/create", {
+          const created = await apiFetch("/api/v1/admin/create", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ license_key: licenseKey, note: note || null }),
+            body: JSON.stringify({ license_key: licenseKey || null, note: note || null }),
           });
           keyInput.value = "";
           noteInput.value = "";
-          await loadLicenses();
+          await Promise.all([loadLicenses(), loadAuditLog()]);
           loadSummary().catch(function () { });
-          showToast("Created license " + licenseKey, "success");
+          const finalKey = (created && created.license_key) || licenseKey;
+          showToast("Created license " + finalKey, "success");
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
         } finally {
