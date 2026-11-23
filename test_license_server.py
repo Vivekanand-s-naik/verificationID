@@ -50,10 +50,13 @@ class FakePostgresDB:
         self.subscription_plans: dict[str, dict] = {}
         self.broadcast_messages: list[dict] = []
         self.broadcast_acks: set[tuple[int, str]] = set()
+        self.system_settings: dict[str, dict] = {}
+        self.contact_messages: list[dict] = []
         self._next_sub_id = 1
         self._next_admin_id = 1
         self._next_audit_id = 1
         self._next_broadcast_id = 1
+        self._next_contact_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -135,22 +138,39 @@ class _FakeCursor:
                     "first_activated_at": first_at,
                     "note": note,
                 }
-                self._rows = [{"device_id": dev}]
+                self._rows = [{"device_id": dev, "first_license_key": first_key}]
                 self.rowcount = 1
             else:
                 self._rows = []
                 self.rowcount = 0
             return
 
-        if "FROM device_trials WHERE device_id = %s" in norm:
-            dt_row = self.db.device_trials.get(params[0])
-            self._rows = [dict(dt_row)] if dt_row else []
+        if norm.startswith("UPDATE device_trials SET first_license_key = %s WHERE device_id = %s"):
+            new_key, dev = params
+            if dev in self.db.device_trials:
+                self.db.device_trials[dev]["first_license_key"] = new_key
+                self.rowcount = 1
             return
 
         if norm.startswith("DELETE FROM device_trials WHERE device_id = %s"):
             if params[0] in self.db.device_trials:
                 del self.db.device_trials[params[0]]
                 self.rowcount = 1
+            return
+
+        if norm.startswith("SELECT") and "FROM device_trials WHERE device_id = %s" in norm:
+            dt_row = self.db.device_trials.get(params[0])
+            self._rows = [dict(dt_row)] if dt_row else []
+            return
+
+        if norm.startswith("SELECT") and "FROM licenses WHERE device_id = %s" in norm:
+            dev = params[0]
+            matches = [dict(r) for r in self.db.licenses.values() if r.get("device_id") == dev]
+            matches.sort(
+                key=lambda r: r.get("activated_at") or r.get("last_seen") or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            self._rows = matches[:1]
             return
 
         if norm.startswith("SELECT") and "FROM licenses WHERE license_key = %s" in norm:
@@ -163,7 +183,10 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO licenses"):
-            if len(params) == 7:
+            if "VALUES (%s, 'active', %s, 'trial', NULL, FALSE, NULL, %s, FALSE)" in norm:
+                key, note, trial_days = params
+                plan, exp, has_paid, allow_repeat = "trial", None, False, False
+            elif len(params) == 7:
                 key, note, plan, exp, has_paid, trial_days, allow_repeat = params
             else:
                 key, note, plan, exp, has_paid = params
@@ -189,6 +212,13 @@ class _FakeCursor:
             if "RETURNING license_key" in norm:
                 self._rows = [{"license_key": key}]
             self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE licenses SET app_version = %s, last_seen = %s WHERE license_key = %s"):
+            ver, seen, key = params
+            if key in self.db.licenses:
+                self.db.licenses[key].update(app_version=ver, last_seen=seen)
+                self.rowcount = 1
             return
 
         if norm.startswith("UPDATE licenses SET device_id = NULL WHERE license_key = %s"):
@@ -563,6 +593,75 @@ class _FakeCursor:
             bid, dev_id, _acked_at = params
             self.db.broadcast_acks.add((int(bid), str(dev_id)))
             self.rowcount = 1
+            return
+
+        if norm.startswith("INSERT INTO system_settings"):
+            if "ON CONFLICT (key) DO UPDATE" in norm:
+                val, upd_at, upd_by = params
+                self.db.system_settings["trial_days"] = {
+                    "key": "trial_days",
+                    "value": str(val),
+                    "updated_at": upd_at,
+                    "updated_by": upd_by,
+                }
+                self.rowcount = 1
+            else:
+                val, upd_at = params
+                if "trial_days" not in self.db.system_settings:
+                    self.db.system_settings["trial_days"] = {
+                        "key": "trial_days",
+                        "value": str(val),
+                        "updated_at": upd_at,
+                        "updated_by": "system",
+                    }
+                    self.rowcount = 1
+            return
+
+        if norm == "SELECT value FROM system_settings WHERE key = 'trial_days'":
+            row = self.db.system_settings.get("trial_days")
+            self._rows = [{"value": row["value"]}] if row else []
+            return
+
+        if "FROM system_settings ORDER BY key ASC" in norm:
+            rows = [dict(self.db.system_settings[k]) for k in sorted(self.db.system_settings)]
+            self._rows = rows
+            return
+
+        if "FROM contact_messages WHERE device_id = %s ORDER BY received_at DESC LIMIT 1" in norm:
+            matches = [m for m in self.db.contact_messages if m["device_id"] == params[0]]
+            matches.sort(key=lambda m: (m["received_at"], m["id"]), reverse=True)
+            self._rows = [{"received_at": matches[0]["received_at"]}] if matches else []
+            return
+
+        if norm.startswith("INSERT INTO contact_messages"):
+            lic_key, dev_id, msg_text, client_ts, received_at = params
+            row = {
+                "id": self.db._next_contact_id,
+                "license_key": lic_key,
+                "device_id": dev_id,
+                "message": msg_text,
+                "client_timestamp": client_ts,
+                "received_at": received_at,
+                "telegram_notified": False,
+            }
+            self.db._next_contact_id += 1
+            self.db.contact_messages.append(row)
+            self._rows = [{"id": row["id"], "received_at": row["received_at"]}]
+            self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE contact_messages SET telegram_notified = TRUE WHERE id = %s"):
+            mid = int(params[0])
+            for m in self.db.contact_messages:
+                if m["id"] == mid:
+                    m["telegram_notified"] = True
+                    self.rowcount = 1
+            return
+
+        if "FROM contact_messages ORDER BY received_at DESC" in norm:
+            limit = int(params[0]) if params else 50
+            ordered = sorted(self.db.contact_messages, key=lambda m: (m["received_at"], m["id"]), reverse=True)
+            self._rows = [dict(m) for m in ordered[:limit]]
             return
 
         raise AssertionError(f"Unhandled SQL in test fake: {norm}")
@@ -1888,3 +1987,250 @@ def test_ed25519_offline_lease_and_server_password_reset_email_relay(env_client,
         )
     assert ok_relay.status_code == 200 and ok_relay.json()["relayed"] is True
     assert len(sent) == 1 and sent[0]["to_email"] == "ops@example.com"
+
+
+
+def test_silent_activate_device_auto_provisions_recovers_and_enforces_one_trial_per_device(env_client, monkeypatch):
+    """
+    Verify POST /api/v1/activate-device unit/integration behavior:
+      1. Never-seen device receives auto-generated key, 180d trial, Ed25519 lease, device_trials row.
+      2. Re-calling with same device returns exact existing license & expiry (zero duplicates, newly_provisioned=False).
+      3. Different device receives its own independent 180-day trial license.
+      4. Revoked/expired existing device returns revoked/expired untouched (no reset/new key).
+      5. Unbound device already in device_trials gets trial_already_used until owner override.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    priv = Ed25519PrivateKey.generate()
+    priv_b64 = base64.b64encode(
+        priv.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    ).decode("ascii")
+    monkeypatch.setenv("LICENSE_SIGNING_PRIVATE_KEY_B64", priv_b64)
+
+    # 1. First launch for new PC-A -> auto-provisions 180d trial
+    r1 = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-a", "app_version": "1.0.0"})
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["status"] == "active"
+    assert b1["plan"] == "trial"
+    assert b1["newly_provisioned"] is True
+    assert b1["license_key"].startswith("ANPR-")
+    assert b1["expires_at"] is not None
+    assert b1["offline_lease"] is not None and b1["offline_lease"]["alg"] == "Ed25519"
+    key_a = b1["license_key"]
+    assert db.device_trials["auto-dev-pc-a"]["first_license_key"] == key_a
+
+    # 2. Second call for same PC-A -> returns exact same key & expiry, no second license created
+    r2 = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-a", "app_version": "1.0.0"})
+    assert r2.status_code == 200
+    b2 = r2.json()
+    assert b2["status"] == "active"
+    assert b2["newly_provisioned"] is False
+    assert b2["license_key"] == key_a
+    assert b2["expires_at"] == b1["expires_at"]
+    assert sum(1 for lic in db.licenses.values() if lic.get("device_id") == "auto-dev-pc-a") == 1
+
+    # 3. Distinct PC-B -> gets its own independent key
+    rb = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-b", "app_version": "1.0.0"})
+    assert rb.status_code == 200 and rb.json()["newly_provisioned"] is True
+    assert rb.json()["license_key"] != key_a
+
+    # 4. Revoke PC-A -> returns revoked untouched (no offline lease)
+    assert client.post("/api/v1/admin/revoke", params={"license_key": key_a}, headers=ADMIN_HDR).status_code == 200
+    r_rev = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-a", "app_version": "1.0.0"})
+    assert r_rev.json()["status"] == "revoked"
+    assert r_rev.json()["license_key"] == key_a
+    assert r_rev.json()["offline_lease"] is None
+
+    # 5. Reactivate + expire -> returns expired untouched
+    assert client.post("/api/v1/admin/reactivate", params={"license_key": key_a}, headers=ADMIN_HDR).status_code == 200
+    assert client.post("/api/v1/admin/expire", params={"license_key": key_a}, headers=ADMIN_HDR).status_code == 200
+    r_exp = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-a", "app_version": "1.0.0"})
+    assert r_exp.json()["status"] == "expired" and r_exp.json()["license_key"] == key_a
+
+    # 6. Unbind PC-A -> activate-device rejects with trial_already_used
+    assert client.post("/api/v1/admin/unbind-device", params={"license_key": key_a}, headers=ADMIN_HDR).status_code == 200
+    r_used = client.post("/api/v1/activate-device", json={"device_id": "auto-dev-pc-a", "app_version": "1.0.0"})
+    assert r_used.json()["status"] == "trial_already_used" and r_used.json()["license_key"] is None
+
+
+def test_health_and_ping_keepalive_endpoints_zero_db_queries(env_client):
+    """GET and HEAD /health & /ping must return 200 OK immediately without touching Postgres."""
+    client, db = env_client
+    sql_before = len(db.executed_sql)
+    for path in ("/health", "/ping"):
+        r_get = client.get(path)
+        assert r_get.status_code == 200
+        assert r_get.json()["status"] == "ok"
+        r_head = client.head(path)
+        assert r_head.status_code == 200
+    assert len(db.executed_sql) == sql_before, "Keep-alive endpoints must not run DB queries!"
+
+
+def test_contact_message_relay_owner_telegram_rate_limit_and_table_isolation(env_client, monkeypatch):
+    """
+    Verify POST /api/v1/contact-message:
+      - Relays strictly to owner's TELEGRAM_CHAT_ID via sendMessage with expected format
+      - Persists to `contact_messages` (separate from `payment_submissions`)
+      - Enforces max 1 message per 2 minutes per device_id (429)
+      - Admin listing endpoint returns stored messages
+    """
+    client, db = env_client
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "98765:FAKE_OWNER_BOT")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1122334455")
+
+    tg_calls = []
+
+    def fake_tg_post(url, data=None, timeout=None, **_kwargs):
+        tg_calls.append({"url": url, "data": data})
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    with patch.object(srv.requests, "post", side_effect=fake_tg_post):
+        r1 = client.post(
+            "/api/v1/contact-message",
+            json={
+                "license_key": "VIVEK-ANPR-0001",
+                "device_id": "gate-pc-support-01",
+                "message": "Need help transferring license to new gate PC.",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    assert r1.status_code == 200
+    b1 = r1.json()
+    assert b1["ok"] is True
+    assert b1["telegram_notified"] is True
+    assert len(tg_calls) == 1
+    assert "/sendMessage" in tg_calls[0]["url"]
+    assert tg_calls[0]["data"]["chat_id"] == "1122334455"
+    assert "📩 Message from [VIVEK-ANPR-0001 / gate-pc-support-01]:" in tg_calls[0]["data"]["text"]
+    assert "Need help transferring license to new gate PC." in tg_calls[0]["data"]["text"]
+
+    # Stored in contact_messages ONLY (never touches payment_submissions)
+    assert len(db.contact_messages) == 1
+    assert db.contact_messages[0]["telegram_notified"] is True
+    assert len(db.submissions) == 0
+
+    # Immediate second message from same device within 2 minutes -> 429 rate limited
+    r_rl = client.post(
+        "/api/v1/contact-message",
+        json={
+            "license_key": "VIVEK-ANPR-0001",
+            "device_id": "gate-pc-support-01",
+            "message": "Spam follow-up",
+        },
+    )
+    assert r_rl.status_code == 429
+    assert len(db.contact_messages) == 1
+
+    # Different device is NOT rate-limited by first device
+    with patch.object(srv.requests, "post", side_effect=fake_tg_post):
+        r_other = client.post(
+            "/api/v1/contact-message",
+            json={"device_id": "gate-pc-support-02", "message": "Hello from gate 2"},
+        )
+    assert r_other.status_code == 200
+    assert "📩 Message from [unregistered / gate-pc-support-02]:" in tg_calls[-1]["data"]["text"]
+
+    # After 2+ minutes elapse, first device can send again
+    db.contact_messages[0]["received_at"] = datetime.now(timezone.utc) - timedelta(minutes=3)
+    with patch.object(srv.requests, "post", side_effect=fake_tg_post):
+        r_again = client.post(
+            "/api/v1/contact-message",
+            json={
+                "license_key": "VIVEK-ANPR-0001",
+                "device_id": "gate-pc-support-01",
+                "message": "Follow-up after cooldown.",
+            },
+        )
+    assert r_again.status_code == 200
+
+    # Admin contact-messages list returns all 3 messages
+    lst = client.get("/api/v1/admin/contact-messages", headers=ADMIN_HDR)
+    assert lst.status_code == 200
+    assert len(lst.json()) == 3
+
+
+def test_dynamic_trial_days_settings_and_non_retroactive_auto_provisioning(env_client):
+    """
+    Verify dynamic `system_settings.trial_days`:
+      - Seeded to 180 on init_db()
+      - Owner-only access (non-owner admin gets 403)
+      - Change 180 -> 7 -> newly auto-provisioned PC-1 gets exact 7-day trial
+      - Change 7 -> 30 -> newly auto-provisioned PC-2 gets exact 30-day trial
+      - PC-1 retains its original 7-day expiry (strictly non-retroactive!)
+      - Change logged in `license_audit_log` as `setting_updated`
+    """
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    # Seeded default is 180
+    s0 = client.get("/api/v1/admin/settings", headers=ADMIN_HDR)
+    assert s0.status_code == 200
+    assert s0.json()["trial_days"] == 180
+
+    # Non-owner staff admin cannot read or change system settings (403)
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 91,
+        "username": "staff-no-settings",
+        "password_hash": srv._hash_password("StaffSettings!91"),
+        "email": "staff91@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_login = client.post("/api/v1/admin/login", json={"username": "staff-no-settings", "password": "StaffSettings!91"})
+    st_hdr = {"Authorization": f"Bearer {st_login.json()['token']}"}
+    assert client.get("/api/v1/admin/settings", headers=st_hdr).status_code == 403
+    assert client.put("/api/v1/admin/settings", json={"trial_days": 7}, headers=st_hdr).status_code == 403
+    client.cookies.clear()
+
+    # Invalid bounds rejected (400)
+    assert client.put("/api/v1/admin/settings", json={"trial_days": 0}, headers=ADMIN_HDR).status_code == 400
+    assert client.put("/api/v1/admin/settings", json={"trial_days": 4000}, headers=ADMIN_HDR).status_code == 400
+
+    # Owner updates trial_days: 180 -> 7
+    u1 = client.put("/api/v1/admin/settings", json={"trial_days": 7}, headers=ADMIN_HDR)
+    assert u1.status_code == 200
+    assert u1.json()["trial_days"] == 7
+    assert u1.json()["previous_trial_days"] == 180
+    assert any(a["action"] == "setting_updated" and a["new_plan"] == "7d" for a in db.audit_log)
+
+    # Auto-provision PC-1 -> gets 7-day expiry!
+    r_pc1 = client.post("/api/v1/activate-device", json={"device_id": "dyn-trial-pc-001", "app_version": "1.0.0"})
+    assert r_pc1.status_code == 200
+    b_pc1 = r_pc1.json()
+    assert b_pc1["status"] == "active" and b_pc1["newly_provisioned"] is True
+    exp_pc1 = datetime.fromisoformat(b_pc1["expires_at"])
+    days_pc1 = (exp_pc1 - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    assert 6.9 <= days_pc1 <= 7.1
+
+    # Owner updates trial_days: 7 -> 30
+    u2 = client.put("/api/v1/admin/settings", json={"trial_days": 30}, headers=ADMIN_HDR)
+    assert u2.status_code == 200 and u2.json()["trial_days"] == 30
+
+    # Auto-provision PC-2 -> gets 30-day expiry!
+    r_pc2 = client.post("/api/v1/activate-device", json={"device_id": "dyn-trial-pc-002", "app_version": "1.0.0"})
+    assert r_pc2.status_code == 200
+    b_pc2 = r_pc2.json()
+    assert b_pc2["status"] == "active" and b_pc2["newly_provisioned"] is True
+    exp_pc2 = datetime.fromisoformat(b_pc2["expires_at"])
+    days_pc2 = (exp_pc2 - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    assert 29.9 <= days_pc2 <= 30.1
+
+    # PC-1 re-check MUST still have its original 7-day expiry (non-retroactive!)
+    r_pc1_again = client.post("/api/v1/activate-device", json={"device_id": "dyn-trial-pc-001", "app_version": "1.0.0"})
+    assert r_pc1_again.status_code == 200
+    assert r_pc1_again.json()["expires_at"] == b_pc1["expires_at"]
+    assert db.licenses[b_pc1["license_key"]]["trial_days"] == 7
+    assert db.licenses[b_pc2["license_key"]]["trial_days"] == 30

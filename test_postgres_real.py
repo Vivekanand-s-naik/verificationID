@@ -337,3 +337,227 @@ def test_real_pg_transaction_rollback_and_recovery(pg_env):
     # Status must still be 'active' because get_db() rolled back cleanly
     v = client.post("/api/v1/validate", json={"license_key": "ROLLBACK-001", "device_id": "rb-dev-1", "app_version": "1.0.0"})
     assert v.json()["status"] == "active"
+
+
+
+def test_real_pg_silent_activate_device_concurrency_idempotency_and_owner_ops(pg_env):
+    """
+    Real PostgreSQL 17 end-to-end verification for POST /api/v1/activate-device:
+      1. 8 concurrent first-launch threads from the SAME brand-new device_id race on
+         /api/v1/activate-device -> strictly ONE license row created, ONE device_trials row,
+         all 8 threads receive the SAME key & expiry (no duplicate licenses!).
+      2. Re-calling /api/v1/activate-device after expiry or revocation returns exact existing
+         state without resetting, extending, or creating a new license.
+      3. A genuinely different device_id gets its own independent 180-day trial license.
+      4. SystemOwner actions (revoke, reactivate, reset-plan handover, unbind-device,
+         device-trials/override) work identically on auto-provisioned licenses!
+    """
+    srv, client, pub = pg_env
+    srv.init_db()
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    barrier = threading.Barrier(8)
+
+    def first_launch_worker(_idx: int):
+        c = TestClient(srv.app)
+        barrier.wait()
+        r = c.post(
+            "/api/v1/activate-device",
+            json={"device_id": "fresh-win-pc-alpha-0001", "app_version": "1.0.0"},
+        )
+        return r.status_code, r.json()
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(first_launch_worker, range(8)))
+
+    assert all(code == 200 for code, _ in results)
+    assert all(body["status"] == "active" for _, body in results)
+    keys = {body["license_key"] for _, body in results}
+    assert len(keys) == 1, f"Expected strictly 1 auto-provisioned key across 8 racing threads, got {keys}"
+    key_alpha = next(iter(keys))
+    assert key_alpha.startswith("ANPR-")
+    newly_flags = [body["newly_provisioned"] for _, body in results]
+    assert newly_flags.count(True) == 1
+    assert newly_flags.count(False) == 7
+
+    # Verify DB has strictly 1 license and 1 device_trials record for alpha, plus valid Ed25519 lease
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM licenses WHERE device_id = 'fresh-win-pc-alpha-0001'")
+            assert cur.fetchone()["cnt"] == 1
+            cur.execute("SELECT * FROM device_trials WHERE device_id = 'fresh-win-pc-alpha-0001'")
+            dt = cur.fetchone()
+            assert dt is not None and dt["first_license_key"] == key_alpha
+
+    lease = results[0][1]["offline_lease"]
+    assert lease is not None and lease["alg"] == "Ed25519"
+    pub.verify(base64.b64decode(lease["signature_b64"]), base64.b64decode(lease["payload_b64"]))
+
+    # Genuinely different PC gets its own independent 180-day trial
+    r_beta = client.post(
+        "/api/v1/activate-device",
+        json={"device_id": "fresh-win-pc-beta-0002", "app_version": "1.0.0"},
+    )
+    assert r_beta.status_code == 200
+    b_beta = r_beta.json()
+    assert b_beta["status"] == "active" and b_beta["newly_provisioned"] is True
+    assert b_beta["license_key"] != key_alpha
+
+    # Revoke alpha -> re-calling activate-device returns 'revoked' (no new trial!)
+    assert client.post("/api/v1/admin/revoke", params={"license_key": key_alpha}, headers=ADMIN_HDR).status_code == 200
+    r_rev = client.post(
+        "/api/v1/activate-device",
+        json={"device_id": "fresh-win-pc-alpha-0001", "app_version": "1.0.0"},
+    )
+    assert r_rev.status_code == 200
+    assert r_rev.json()["status"] == "revoked"
+    assert r_rev.json()["license_key"] == key_alpha
+    assert r_rev.json()["offline_lease"] is None
+
+    # Owner reactivates -> force expire -> re-calling activate-device returns 'expired' untouched!
+    assert client.post("/api/v1/admin/reactivate", params={"license_key": key_alpha}, headers=ADMIN_HDR).status_code == 200
+    assert client.post("/api/v1/admin/expire", params={"license_key": key_alpha}, headers=ADMIN_HDR).status_code == 200
+    r_exp = client.post(
+        "/api/v1/activate-device",
+        json={"device_id": "fresh-win-pc-alpha-0001", "app_version": "1.0.0"},
+    )
+    assert r_exp.status_code == 200
+    assert r_exp.json()["status"] == "expired"
+    assert r_exp.json()["license_key"] == key_alpha
+
+    # Reset Plan (Handover) works identically on the auto-provisioned license
+    r_rst = client.post(
+        "/api/v1/admin/reset-plan",
+        params={"license_key": key_alpha, "plan": "trial"},
+        headers=ADMIN_HDR,
+    )
+    assert r_rst.status_code == 200 and r_rst.json()["days_reset"] == 180
+
+    # Owner unbinds alpha's license -> alpha calling activate-device MUST get trial_already_used (no 2nd free trial!)
+    assert client.post("/api/v1/admin/unbind-device", params={"license_key": key_alpha}, headers=ADMIN_HDR).status_code == 200
+    r_used = client.post(
+        "/api/v1/activate-device",
+        json={"device_id": "fresh-win-pc-alpha-0001", "app_version": "1.0.0"},
+    )
+    assert r_used.status_code == 200
+    assert r_used.json()["status"] == "trial_already_used"
+
+    # Owner trial override clears device_trials -> alpha can now legitimately auto-provision a fresh trial!
+    ov = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": "fresh-win-pc-alpha-0001", "note": "RMA override"},
+        headers=ADMIN_HDR,
+    )
+    assert ov.status_code == 200 and ov.json()["cleared"] is True
+    r_fresh = client.post(
+        "/api/v1/activate-device",
+        json={"device_id": "fresh-win-pc-alpha-0001", "app_version": "1.0.0"},
+    )
+    assert r_fresh.status_code == 200
+    assert r_fresh.json()["status"] == "active" and r_fresh.json()["newly_provisioned"] is True
+
+
+def test_real_pg_contact_messages_keepalive_and_dynamic_trial_days(pg_env, monkeypatch):
+    """
+    Real PostgreSQL 17 end-to-end verification for:
+      1. GET/HEAD /health and /ping keep-alive endpoints.
+      2. POST /api/v1/contact-message persisted in Postgres `contact_messages` (separate from
+         `payment_submissions`) with 2-minute DB rate limit enforcement.
+      3. Dynamic `system_settings.trial_days`: 180 -> 7 -> new device gets 7-day trial ->
+         7 -> 180 -> second new device gets 180-day trial while first device retains 7-day expiry!
+    """
+    from unittest.mock import MagicMock, patch
+
+    srv, client, _pub = pg_env
+    srv.init_db()
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    # 1. Keep-alive probes
+    for path in ("/health", "/ping"):
+        assert client.get(path).status_code == 200
+        assert client.head(path).status_code == 200
+
+    # 2. Contact message persisted in Postgres `contact_messages` + 2-min rate limit
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "11111:REAL_PG_MOCK_BOT")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777666555")
+    sent_tg = []
+
+    def _mock_tg(url, data=None, timeout=None, **_kw):
+        sent_tg.append((url, data))
+        m = MagicMock()
+        m.status_code = 200
+        return m
+
+    with patch.object(srv.requests, "post", side_effect=_mock_tg):
+        cm1 = client.post(
+            "/api/v1/contact-message",
+            json={
+                "license_key": "ANPR-DEMO-TEST-0001",
+                "device_id": "pg-contact-dev-01",
+                "message": "Gate camera 2 setup inquiry",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    assert cm1.status_code == 200
+    assert cm1.json()["telegram_notified"] is True
+    assert len(sent_tg) == 1 and "📩 Message from [ANPR-DEMO-TEST-0001 / pg-contact-dev-01]:" in sent_tg[0][1]["text"]
+
+    # Immediate repeat from same device -> 429 rate-limited via Postgres `received_at`
+    cm_rl = client.post(
+        "/api/v1/contact-message",
+        json={"device_id": "pg-contact-dev-01", "message": "Immediate retry"},
+    )
+    assert cm_rl.status_code == 429
+
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM contact_messages WHERE device_id = 'pg-contact-dev-01'")
+            rows = cur.fetchall()
+            assert len(rows) == 1
+            assert rows[0]["message"] == "Gate camera 2 setup inquiry"
+            assert rows[0]["telegram_notified"] is True
+            cur.execute("SELECT COUNT(*) AS cnt FROM payment_submissions")
+            assert cur.fetchone()["cnt"] == 0
+
+    # 3. Dynamic trial_days in real PostgreSQL: 180 -> 7 -> 180 (non-retroactive!)
+    s_init = client.get("/api/v1/admin/settings", headers=ADMIN_HDR)
+    assert s_init.status_code == 200 and s_init.json()["trial_days"] == 180
+
+    # Change trial_days to 7
+    s_7 = client.put("/api/v1/admin/settings", json={"trial_days": 7}, headers=ADMIN_HDR)
+    assert s_7.status_code == 200 and s_7.json()["trial_days"] == 7
+
+    # Auto-provision Device A -> gets 7-day expiry
+    dev_a = client.post("/api/v1/activate-device", json={"device_id": "pg-dyn-dev-a-0001", "app_version": "1.0.0"})
+    assert dev_a.status_code == 200
+    body_a = dev_a.json()
+    assert body_a["status"] == "active" and body_a["newly_provisioned"] is True
+    exp_a = datetime.fromisoformat(body_a["expires_at"])
+    days_a = (exp_a - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    assert 6.9 <= days_a <= 7.1
+
+    # Change trial_days back to 180 (re-running init_db() must NOT overwrite owner settings either!)
+    s_30 = client.put("/api/v1/admin/settings", json={"trial_days": 30}, headers=ADMIN_HDR)
+    assert s_30.status_code == 200 and s_30.json()["trial_days"] == 30
+    srv.init_db()
+    assert client.get("/api/v1/admin/settings", headers=ADMIN_HDR).json()["trial_days"] == 30
+
+    # Auto-provision Device B -> gets 30-day expiry
+    dev_b = client.post("/api/v1/activate-device", json={"device_id": "pg-dyn-dev-b-0002", "app_version": "1.0.0"})
+    assert dev_b.status_code == 200
+    body_b = dev_b.json()
+    assert body_b["status"] == "active" and body_b["newly_provisioned"] is True
+    exp_b = datetime.fromisoformat(body_b["expires_at"])
+    days_b = (exp_b - datetime.now(timezone.utc)).total_seconds() / 86400.0
+    assert 29.9 <= days_b <= 30.1
+
+    # Device A's expiry in Postgres MUST remain strictly 7 days (non-retroactive!)
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT expires_at, trial_days FROM licenses WHERE license_key = %s", (body_a["license_key"],))
+            row_a = cur.fetchone()
+            assert row_a["trial_days"] == 7
+            assert abs((row_a["expires_at"] - exp_a).total_seconds()) < 1.0
+            cur.execute("SELECT expires_at, trial_days FROM licenses WHERE license_key = %s", (body_b["license_key"],))
+            row_b = cur.fetchone()
+            assert row_b["trial_days"] == 30

@@ -1489,6 +1489,30 @@
       <div class="card">
         <div class="card-head">
           <div>
+            <h2 class="card-title">Free Trial Duration (Auto-Provisioning)</h2>
+            <p class="card-subtitle">Controls the trial duration granted to newly auto-provisioned devices and new trial keys immediately without redeploying. Existing already-activated trials keep their original expiry date.</p>
+          </div>
+          <span class="badge badge-owner">System Owner</span>
+        </div>
+        <form id="trial-days-form" style="display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px;">
+          <div class="field" style="width:160px; margin:0;">
+            <label for="setting-trial-days">Trial Duration (Days)</label>
+            <input id="setting-trial-days" type="number" min="1" max="3650" value="180" required />
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+            <button type="button" class="btn btn-sm" data-trial-preset="7">7d</button>
+            <button type="button" class="btn btn-sm" data-trial-preset="30">30d</button>
+            <button type="button" class="btn btn-sm" data-trial-preset="90">90d</button>
+            <button type="button" class="btn btn-sm" data-trial-preset="180">180d</button>
+          </div>
+          <button type="submit" id="save-trial-days-btn" class="btn btn-primary">Save Trial Duration</button>
+          <span id="trial-days-meta" style="font-size:0.78rem; color:var(--text-muted); margin-left:auto;"></span>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
             <h2 class="card-title">Live Subscription Plans &amp; Pricing</h2>
             <p class="card-subtitle">Edit prices, labels, or durations live — changes immediately reflect in the client app's renewal dialog &amp; UPI QR code without redeploying. Deactivating hides a plan without deleting historical records.</p>
           </div>
@@ -2253,13 +2277,17 @@
           const isReactivated = act === "reactivated";
           const isCreated = act === "license_created";
           const isTrialOverride = act === "trial_override";
+          const isSetting = act === "setting_updated";
+          const isPlanChange = act === "plan_created" || act === "plan_updated";
           const badgeCls = isReset
             ? "badge-handover"
             : (isRevoked
               ? "badge-revoked"
               : (isUnbind || isTrialOverride
                 ? "badge-expired"
-                : (isBound || isReactivated || isCreated ? "badge-active" : "badge-renew")));
+                : (isSetting || isPlanChange
+                  ? "badge-owner"
+                  : (isBound || isReactivated || isCreated ? "badge-active" : "badge-renew"))));
           const badgeTxt = isReset
             ? "HANDOVER RESET"
             : (isRevoked
@@ -2270,11 +2298,15 @@
                   ? "CREATED"
                   : (isTrialOverride
                     ? "TRIAL OVERRIDE"
-                    : (isUnbind
-                      ? "DEVICE UNBOUND"
-                      : (isBound
-                        ? "DEVICE BOUND"
-                        : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))));
+                    : (isSetting
+                      ? "SETTING UPDATED"
+                      : (isPlanChange
+                        ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
+                        : (isUnbind
+                          ? "DEVICE UNBOUND"
+                          : (isBound
+                            ? "DEVICE BOUND"
+                            : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))))));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -2465,7 +2497,11 @@
 
       async function loadAdminPlans() {
         if (!(state.session && state.session.is_owner)) return;
-        state.adminPlans = await apiFetch("/api/v1/admin/plans");
+        const [plansRes, settingsRes] = await Promise.all([
+          apiFetch("/api/v1/admin/plans"),
+          apiFetch("/api/v1/admin/settings").catch(function () { return null; }),
+        ]);
+        state.adminPlans = plansRes;
         // Keep active plans map synced for Licenses dropdowns immediately
         const activeMap = {};
         state.adminPlans.forEach(function (p) {
@@ -2474,6 +2510,17 @@
           }
         });
         state.plans = activeMap;
+        if (settingsRes && settingsRes.trial_days) {
+          const tdInput = document.getElementById("setting-trial-days");
+          const tdMeta = document.getElementById("trial-days-meta");
+          if (tdInput) tdInput.value = String(settingsRes.trial_days);
+          const metaObj = settingsRes.settings && settingsRes.settings.trial_days;
+          if (tdMeta) {
+            tdMeta.textContent = metaObj && metaObj.updated_at
+              ? "Active: " + settingsRes.trial_days + "d · updated " + formatDate(metaObj.updated_at)
+              : "Active: " + settingsRes.trial_days + " days";
+          }
+        }
         renderAdminPlans();
         renderLicenses();
       }
@@ -2746,6 +2793,43 @@
           if (err.message !== "Session expired") showToast(err.message, "error");
         }
       });
+
+      document.querySelectorAll("[data-trial-preset]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const tdInput = document.getElementById("setting-trial-days");
+          if (tdInput) tdInput.value = btn.dataset.trialPreset || "180";
+        });
+      });
+
+      const trialForm = document.getElementById("trial-days-form");
+      if (trialForm) {
+        trialForm.addEventListener("submit", async function (evt) {
+          evt.preventDefault();
+          const tdInput = document.getElementById("setting-trial-days");
+          const btn = document.getElementById("save-trial-days-btn");
+          const days = Number(tdInput && tdInput.value);
+          if (!Number.isInteger(days) || days < 1 || days > 3650) {
+            showToast("Trial duration must be a whole number between 1 and 3650 days.", "error");
+            return;
+          }
+          btn.disabled = true;
+          btn.textContent = "Saving...";
+          try {
+            const res = await apiFetch("/api/v1/admin/settings", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ trial_days: days }),
+            });
+            await Promise.all([loadAdminPlans(), loadAuditLog()]);
+            showToast("Updated trial duration to " + res.trial_days + " days for new devices.", "success");
+          } catch (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "Save Trial Duration";
+          }
+        });
+      }
 
       document.getElementById("create-plan-form").addEventListener("submit", async function (evt) {
         evt.preventDefault();

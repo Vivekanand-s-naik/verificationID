@@ -36,6 +36,8 @@ TRIAL_DAYS = 180
 OFFLINE_LEASE_GRACE_HOURS = 72
 SCREENSHOT_RATE_LIMIT_MINUTES = 10
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024  # 5 MB
+CONTACT_MESSAGE_RATE_LIMIT_MINUTES = 2
+MAX_CONTACT_MESSAGE_CHARS = 1500
 
 ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
 SESSION_COOKIE_NAME = "admin_session"
@@ -49,6 +51,9 @@ _UNKNOWN_KEY_ATTEMPTS: dict[str, list[float]] = {}
 EMAIL_RELAY_RATE_LIMIT_MAX = 5
 EMAIL_RELAY_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 _EMAIL_RELAY_ATTEMPTS: dict[str, list[float]] = {}
+ACTIVATE_DEVICE_RATE_LIMIT_MAX = 30
+ACTIVATE_DEVICE_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
+_ACTIVATE_DEVICE_ATTEMPTS: dict[str, list[float]] = {}
 _KEY_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 _RESET_CODE_RE = re.compile(r"^[A-Za-z0-9-]{4,16}$")
 ADMIN_PAGE_CSP = (
@@ -301,7 +306,35 @@ def init_db():
                 )
             """)
 
+            # Dynamic server settings (e.g. trial_days for newly auto-provisioned devices)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_by TEXT NOT NULL DEFAULT 'system'
+                )
+            """)
+
+            # Two-way client-to-owner support/contact messages (separate from payment_submissions)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS contact_messages (
+                    id SERIAL PRIMARY KEY,
+                    license_key TEXT,
+                    device_id TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    client_timestamp TIMESTAMPTZ,
+                    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    telegram_notified BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_contact_messages_device_time
+                ON contact_messages (device_id, received_at DESC)
+            """)
+
             _seed_default_plans(cur)
+            _seed_default_system_settings(cur)
             _seed_initial_owner_user(cur)
 
 
@@ -380,6 +413,32 @@ def _seed_default_plans(cur) -> bool:
         )
     logger.info("Seeded %d default subscription plans into subscription_plans.", len(DEFAULT_PLANS))
     return True
+
+
+def _seed_default_system_settings(cur) -> None:
+    """Seed default system_settings keys once without ever overwriting owner-configured values."""
+    cur.execute(
+        """
+        INSERT INTO system_settings (key, value, updated_at, updated_by)
+        VALUES ('trial_days', %s, %s, 'system')
+        ON CONFLICT (key) DO NOTHING
+        """,
+        (str(TRIAL_DAYS), _utc_now()),
+    )
+
+
+def _get_configured_trial_days(cur) -> int:
+    """Read live trial duration (in days) from `system_settings`, falling back to TRIAL_DAYS."""
+    cur.execute("SELECT value FROM system_settings WHERE key = 'trial_days'")
+    row = cur.fetchone()
+    if row is not None:
+        try:
+            val = int(str(row.get("value") or "").strip())
+            if 1 <= val <= 3650:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return TRIAL_DAYS
 
 
 def _load_plans_map(cur, include_inactive: bool = False) -> dict[str, dict]:
@@ -783,6 +842,20 @@ def _check_and_record_email_relay_rate_limit(license_key: str) -> None:
         )
     recent.append(now_ts)
     _EMAIL_RELAY_ATTEMPTS[license_key] = recent
+
+
+def _check_and_record_activate_device_rate_limit(ip: str) -> None:
+    """Rate-limit newly auto-provisioned device activations per IP to prevent DB flooding."""
+    now_ts = time.monotonic()
+    cutoff = now_ts - ACTIVATE_DEVICE_RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in _ACTIVATE_DEVICE_ATTEMPTS.get(ip, []) if ts > cutoff]
+    if len(recent) >= ACTIVATE_DEVICE_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many new device activations from this network recently. Please try again later.",
+        )
+    recent.append(now_ts)
+    _ACTIVATE_DEVICE_ATTEMPTS[ip] = recent
 
 
 def _send_password_reset_smtp(
@@ -1208,6 +1281,47 @@ def _send_telegram_payment_notification(
         return False
 
 
+def _send_telegram_contact_message(
+    *,
+    message_id: int,
+    license_key: str | None,
+    device_id: str,
+    message_text: str,
+    received_at: datetime,
+) -> bool:
+    """
+    Relay a client "Contact Admin" support message immediately to the owner's Telegram chat ONLY
+    (via TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from server env vars — never broadcast to
+    vehicle-alert subscribers).
+    """
+    bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not bot_token or not chat_id:
+        logger.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured; skipping Telegram contact relay.")
+        return False
+
+    key_label = (license_key or "").strip() or "unregistered"
+    text = (
+        f"📩 Message from [{key_label} / {device_id}]:\n\n"
+        f"{message_text}\n\n"
+        f"Ref #{message_id} • {received_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            data={"chat_id": chat_id, "text": text},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return True
+        logger.warning("Telegram sendMessage returned HTTP %s: %s", resp.status_code, resp.text[:200])
+        return False
+    except Exception as exc:
+        logger.warning("Telegram contact relay failed for message #%s: %s", message_id, exc)
+        return False
+
+
 # ===================================================================== SCHEMAS
 class ValidateRequest(BaseModel):
     license_key: str
@@ -1222,6 +1336,22 @@ class ValidateResponse(BaseModel):
     plan: str | None = None
     broadcasts: list[dict] = []
     offline_lease: dict | None = None
+
+
+class ActivateDeviceRequest(BaseModel):
+    device_id: str
+    app_version: str
+
+
+class ActivateDeviceResponse(BaseModel):
+    status: str  # "active" | "revoked" | "expired" | "trial_already_used" | "invalid"
+    license_key: str | None = None
+    message: str | None = None
+    expires_at: str | None = None
+    plan: str | None = None
+    broadcasts: list[dict] = []
+    offline_lease: dict | None = None
+    newly_provisioned: bool = False
 
 
 class PasswordResetEmailRelayRequest(BaseModel):
@@ -1283,7 +1413,29 @@ class UpdateOwnerAccountRequest(BaseModel):
     new_password: str | None = None
 
 
+class ContactMessageRequest(BaseModel):
+    message: str
+    license_key: str | None = None
+    device_id: str
+    timestamp: str | None = None
+
+
+class UpdateSystemSettingsRequest(BaseModel):
+    trial_days: int
+
+
 # ============================================================== PUBLIC ROUTES
+@app.api_route("/health", methods=["GET", "HEAD"])
+@app.api_route("/ping", methods=["GET", "HEAD"])
+def health_ping():
+    """
+    Lightweight keep-alive & uptime probe endpoint (zero database queries).
+    Used by external schedulers (e.g. cron-job.org / UptimeRobot) every 10–14 min
+    to keep the Render service warm without burning database compute.
+    """
+    return {"status": "ok", "service": "anpr-license-server"}
+
+
 @app.get("/api/v1/plans")
 def get_plans(license_key: str | None = Query(default=None)):
     """
@@ -1493,6 +1645,392 @@ def validate(req: ValidateRequest, request: Request):
                 plan=plan,
                 broadcasts=broadcasts,
             )
+
+
+def _activate_response_for_existing_row(
+    cur,
+    row: dict,
+    *,
+    req_device_id: str,
+    app_version: str,
+    now: datetime,
+    newly_provisioned: bool = False,
+) -> ActivateDeviceResponse:
+    """Build an ActivateDeviceResponse for an already-bound license row without mutating expiry/plan."""
+    lic_key = str(row["license_key"])
+    status = (row.get("status") or "").strip().lower()
+    plan = (row.get("plan") or "trial").strip().lower()
+    expires_at = _as_utc(row.get("expires_at"))
+    expires_iso = _iso_utc(expires_at)
+
+    if status == "revoked":
+        return ActivateDeviceResponse(
+            status="revoked",
+            license_key=lic_key,
+            message="This license has been revoked by the licensor.",
+            expires_at=expires_iso,
+            plan=plan,
+            broadcasts=[],
+            offline_lease=None,
+            newly_provisioned=False,
+        )
+
+    cur.execute(
+        "UPDATE licenses SET app_version = %s, last_seen = %s WHERE license_key = %s",
+        (app_version, now, lic_key),
+    )
+    broadcasts = _fetch_unacked_broadcasts(cur, req_device_id)
+
+    if status == "expired" or (expires_at is not None and expires_at <= now):
+        return ActivateDeviceResponse(
+            status="expired",
+            license_key=lic_key,
+            message="Your subscription or trial period has expired. Please renew to continue.",
+            expires_at=expires_iso,
+            plan=plan,
+            broadcasts=broadcasts,
+            offline_lease=None,
+            newly_provisioned=False,
+        )
+
+    if status == "active":
+        offline_lease = _sign_offline_lease(
+            license_key=lic_key,
+            device_id=req_device_id,
+            plan=plan,
+            expires_at=expires_at,
+            issued_at=now,
+        )
+        return ActivateDeviceResponse(
+            status="active",
+            license_key=lic_key,
+            expires_at=expires_iso,
+            plan=plan,
+            broadcasts=broadcasts,
+            offline_lease=offline_lease,
+            newly_provisioned=newly_provisioned,
+        )
+
+    return ActivateDeviceResponse(
+        status=status or "expired",
+        license_key=lic_key,
+        message="This license is not active.",
+        expires_at=expires_iso,
+        plan=plan,
+        broadcasts=broadcasts,
+        offline_lease=None,
+        newly_provisioned=False,
+    )
+
+
+@app.post("/api/v1/activate-device", response_model=ActivateDeviceResponse)
+def activate_device(req: ActivateDeviceRequest, request: Request):
+    """
+    Silent, zero-prompt first-launch device self-registration & recovery endpoint.
+    Accepts ONLY `device_id` and `app_version` (no manual license key required):
+      - Already-registered device (currently bound in `licenses`, whether active,
+        mid-trial, expired, or revoked): returns its exact existing license state
+        without creating a second license or resetting/extending anything.
+      - Brand-new device (not in `device_trials`): atomically generates a unique
+        high-entropy trial license key (plan='trial', trial_days=180), records it
+        in `device_trials`, starts its 180-day trial upon activation, signs an
+        Ed25519 offline lease, and returns the key + active state directly.
+      - Device whose prior trial license was unbound/transferred away (present in
+        `device_trials` with no bound row in `licenses`): rejects with
+        `status='trial_already_used'` to enforce strictly one free trial per device
+        unless SystemOwner explicitly clears it via `/api/v1/admin/device-trials/override`.
+    """
+    now = _utc_now()
+    req_device_id = (req.device_id or "").strip()
+    if len(req_device_id) < 4:
+        return ActivateDeviceResponse(status="invalid", message="Device identifier is required.")
+
+    client_ip = _client_ip(request)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 1. Fast path: if this device already has a bound license, return it as-is
+            cur.execute(
+                """
+                SELECT * FROM licenses
+                WHERE device_id = %s
+                ORDER BY COALESCE(activated_at, last_seen, NOW()) DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (req_device_id,),
+            )
+            existing_row = cur.fetchone()
+            if existing_row is not None:
+                return _activate_response_for_existing_row(
+                    cur,
+                    existing_row,
+                    req_device_id=req_device_id,
+                    app_version=req.app_version,
+                    now=now,
+                    newly_provisioned=False,
+                )
+
+            # 2. Atomically claim the one-time free-trial slot for this device_id.
+            #    In PostgreSQL, concurrent first-launch requests for the same device_id
+            #    serialize on the device_trials PRIMARY KEY index so strictly ONE license
+            #    is ever created per device.
+            trial_days = _get_configured_trial_days(cur)
+            candidate_key = _generate_secure_license_key()
+            cur.execute(
+                """
+                INSERT INTO device_trials (device_id, first_license_key, first_activated_at, note)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (device_id) DO NOTHING
+                RETURNING device_id, first_license_key
+                """,
+                (req_device_id, candidate_key, now, f"Auto-provisioned {trial_days}-day free trial on first launch"),
+            )
+            claimed = cur.fetchone()
+            if claimed is None:
+                # Either another concurrent request just bound a license for this device,
+                # OR this device previously used its trial and was later unbound/transferred.
+                cur.execute(
+                    """
+                    SELECT * FROM licenses
+                    WHERE device_id = %s
+                    ORDER BY COALESCE(activated_at, last_seen, NOW()) DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (req_device_id,),
+                )
+                raced_row = cur.fetchone()
+                if raced_row is not None:
+                    return _activate_response_for_existing_row(
+                        cur,
+                        raced_row,
+                        req_device_id=req_device_id,
+                        app_version=req.app_version,
+                        now=now,
+                        newly_provisioned=False,
+                    )
+                logger.warning(
+                    "[DEVICE ACTIVATE TRIAL_ALREADY_USED] device=%s (already in device_trials with no bound license)",
+                    req_device_id[:12],
+                )
+                return ActivateDeviceResponse(
+                    status="trial_already_used",
+                    license_key=None,
+                    message=(
+                        "This computer has already used its one-time free trial. "
+                        "Please contact support to restore or purchase a subscription."
+                    ),
+                    plan="trial",
+                    broadcasts=[],
+                    offline_lease=None,
+                    newly_provisioned=False,
+                )
+
+            # Rate-limit brand-new auto-provisions per IP (rolls back device_trials insert on 429)
+            _check_and_record_activate_device_rate_limit(client_ip)
+
+            # 3. Create the new trial license record (plan='trial', starts on activation)
+            #    and bind/activate it immediately in the same atomic transaction.
+            lic_key = ""
+            for attempt in range(10):
+                key_try = candidate_key if attempt == 0 else _generate_secure_license_key()
+                cur.execute(
+                    """
+                    INSERT INTO licenses (
+                        license_key, status, note, plan, expires_at,
+                        has_paid_renewal, activated_at, trial_days, allow_repeat_trial
+                    )
+                    VALUES (%s, 'active', %s, 'trial', NULL, FALSE, NULL, %s, FALSE)
+                    ON CONFLICT (license_key) DO NOTHING
+                    RETURNING license_key
+                    """,
+                    (key_try, f"Auto-provisioned on first launch (device {req_device_id[:12]})", trial_days),
+                )
+                if cur.fetchone() is not None:
+                    lic_key = key_try
+                    break
+            if not lic_key:
+                raise HTTPException(status_code=500, detail="Failed to generate a unique license key.")
+
+            if lic_key != candidate_key:
+                cur.execute(
+                    "UPDATE device_trials SET first_license_key = %s WHERE device_id = %s",
+                    (lic_key, req_device_id),
+                )
+
+            expires_at = now + timedelta(days=trial_days)
+            cur.execute(
+                """
+                UPDATE licenses
+                SET device_id = %s,
+                    app_version = %s,
+                    last_seen = %s,
+                    activated_at = %s,
+                    expires_at = %s
+                WHERE license_key = %s
+                """,
+                (req_device_id, req.app_version, now, now, expires_at, lic_key),
+            )
+            _record_license_audit(
+                cur,
+                license_key=lic_key,
+                action="license_created",
+                actor="auto_provision",
+                previous_plan=None,
+                new_plan="trial",
+                previous_expires_at=None,
+                new_expires_at=None,
+                previous_has_paid_renewal=None,
+                new_has_paid_renewal=False,
+                note=f"Auto-provisioned {trial_days}d trial key for device {req_device_id}",
+            )
+            _record_license_audit(
+                cur,
+                license_key=lic_key,
+                action="device_bound",
+                actor="client",
+                previous_plan="trial",
+                new_plan="trial",
+                previous_expires_at=None,
+                new_expires_at=expires_at,
+                previous_has_paid_renewal=False,
+                new_has_paid_renewal=False,
+                note=f"Auto-bound license key to device {req_device_id}",
+            )
+            logger.info(
+                "[DEVICE AUTO_PROVISIONED] key=%s device=%s trial_days=%s app_version=%s expires=%s",
+                lic_key,
+                req_device_id[:12],
+                trial_days,
+                req.app_version,
+                _iso_utc(expires_at),
+            )
+
+            broadcasts = _fetch_unacked_broadcasts(cur, req_device_id)
+            offline_lease = _sign_offline_lease(
+                license_key=lic_key,
+                device_id=req_device_id,
+                plan="trial",
+                expires_at=expires_at,
+                issued_at=now,
+            )
+            return ActivateDeviceResponse(
+                status="active",
+                license_key=lic_key,
+                expires_at=_iso_utc(expires_at),
+                plan="trial",
+                broadcasts=broadcasts,
+                offline_lease=offline_lease,
+                newly_provisioned=True,
+            )
+
+
+@app.post("/api/v1/contact-message")
+def submit_contact_message(req: ContactMessageRequest):
+    """
+    Public two-way contact endpoint for desktop clients ("Contact Admin" dialog).
+    Rate-limited to max 1 message per 2 minutes per device_id, persisted in the
+    dedicated `contact_messages` table (separate from `payment_submissions`),
+    and relayed immediately to the owner's Telegram chat only.
+    """
+    msg_text = (req.message or "").strip()
+    dev_id = (req.device_id or "").strip()
+    lic_key = (req.license_key or "").strip() or None
+
+    if len(dev_id) < 4:
+        raise HTTPException(status_code=400, detail="Valid device_id is required.")
+    if not msg_text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    if len(msg_text) > MAX_CONTACT_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message is too long (maximum {MAX_CONTACT_MESSAGE_CHARS} characters).",
+        )
+
+    client_ts: datetime | None = None
+    if req.timestamp:
+        try:
+            raw_ts = req.timestamp.strip()
+            if raw_ts.endswith("Z"):
+                raw_ts = raw_ts[:-1] + "+00:00"
+            client_ts = _as_utc(datetime.fromisoformat(raw_ts))
+        except ValueError:
+            client_ts = None
+
+    now = _utc_now()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT received_at
+                FROM contact_messages
+                WHERE device_id = %s
+                ORDER BY received_at DESC
+                LIMIT 1
+                """,
+                (dev_id,),
+            )
+            latest = cur.fetchone()
+            if latest is not None:
+                last_at = _as_utc(latest.get("received_at"))
+                if last_at is not None:
+                    elapsed = (now - last_at).total_seconds()
+                    limit_secs = CONTACT_MESSAGE_RATE_LIMIT_MINUTES * 60
+                    if elapsed < limit_secs:
+                        wait_secs = max(1, int(limit_secs - elapsed))
+                        raise HTTPException(
+                            status_code=429,
+                            detail=(
+                                f"You recently sent a message. Please wait {wait_secs} second(s) "
+                                f"before sending another."
+                            ),
+                        )
+
+            cur.execute(
+                """
+                INSERT INTO contact_messages (
+                    license_key, device_id, message, client_timestamp, received_at, telegram_notified
+                )
+                VALUES (%s, %s, %s, %s, %s, FALSE)
+                RETURNING id, received_at
+                """,
+                (lic_key, dev_id, msg_text, client_ts, now),
+            )
+            inserted = cur.fetchone()
+            msg_id = int(inserted["id"])
+            received_at = _as_utc(inserted.get("received_at")) or now
+
+    notified = _send_telegram_contact_message(
+        message_id=msg_id,
+        license_key=lic_key,
+        device_id=dev_id,
+        message_text=msg_text,
+        received_at=received_at,
+    )
+    if notified:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE contact_messages SET telegram_notified = TRUE WHERE id = %s",
+                    (msg_id,),
+                )
+
+    logger.info(
+        "[CONTACT MESSAGE] id=%s key=%s device=%s len=%d telegram=%s",
+        msg_id,
+        lic_key or "unregistered",
+        dev_id[:12],
+        len(msg_text),
+        notified,
+    )
+    return {
+        "ok": True,
+        "message_id": msg_id,
+        "received_at": received_at.isoformat(),
+        "telegram_notified": notified,
+        "detail": "Message sent — we'll get back to you soon.",
+    }
 
 
 @app.post("/api/v1/email/password-reset")
@@ -2074,17 +2612,18 @@ def create_license(req: CreateLicenseRequest, auth: dict = Depends(_require_admi
                     detail=f"Invalid plan '{req.plan}'. Use 'trial' or one of: {', '.join(all_plans.keys())}",
                 )
 
+            configured_trial_days = _get_configured_trial_days(cur)
             duration_days = max(
                 1,
                 int(req.days)
                 if req.days is not None
-                else (TRIAL_DAYS if plan_key == "trial" else int(all_plans[plan_key]["days"])),
+                else (configured_trial_days if plan_key == "trial" else int(all_plans[plan_key]["days"])),
             )
             has_paid = plan_key != "trial"
             # Free trial countdown starts at FIRST successful device activation (expires_at = NULL until bound).
             # Paid licenses start immediately upon provisioning.
             expires_at = None if plan_key == "trial" else (_utc_now() + timedelta(days=duration_days))
-            trial_days = duration_days if plan_key == "trial" else TRIAL_DAYS
+            trial_days = duration_days if plan_key == "trial" else configured_trial_days
 
             explicit_key = (req.license_key or "").strip()
             if explicit_key:
@@ -3023,6 +3562,111 @@ def update_admin_plan(plan_key: str, req: UpdatePlanRequest, auth: dict = Depend
         "updated_at": now.isoformat(),
         "first_renewal_only": pk == "launch90",
     }
+
+
+@app.get("/api/v1/admin/settings")
+def get_admin_settings(_auth: dict = Depends(_require_owner_or_token)):
+    """SystemOwner-only: inspect dynamic server settings (including `trial_days`)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _seed_default_system_settings(cur)
+            cur.execute("SELECT key, value, updated_at, updated_by FROM system_settings ORDER BY key ASC")
+            rows = cur.fetchall()
+            trial_days = _get_configured_trial_days(cur)
+
+    settings_map = {
+        str(r["key"]): {
+            "value": str(r["value"]),
+            "updated_at": _iso_utc(r.get("updated_at")),
+            "updated_by": str(r.get("updated_by") or "system"),
+        }
+        for r in rows
+    }
+    return {
+        "trial_days": trial_days,
+        "settings": settings_map,
+    }
+
+
+@app.put("/api/v1/admin/settings")
+def update_admin_settings(req: UpdateSystemSettingsRequest, auth: dict = Depends(_require_owner_or_token)):
+    """
+    SystemOwner-only: update dynamic server settings (currently `trial_days`).
+    Applies immediately to all newly auto-provisioned or newly created trial licenses;
+    never retroactively alters already-activated trials.
+    """
+    new_days = int(req.trial_days)
+    if new_days < 1 or new_days > 3650:
+        raise HTTPException(status_code=400, detail="trial_days must be an integer between 1 and 3650.")
+
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            _seed_default_system_settings(cur)
+            prev_days = _get_configured_trial_days(cur)
+            cur.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at, updated_by)
+                VALUES ('trial_days', %s, %s, %s)
+                ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value,
+                    updated_at = EXCLUDED.updated_at,
+                    updated_by = EXCLUDED.updated_by
+                """,
+                (str(new_days), now, actor),
+            )
+            _record_license_audit(
+                cur,
+                license_key="SETTING:trial_days",
+                action="setting_updated",
+                actor=actor,
+                previous_plan=f"{prev_days}d",
+                new_plan=f"{new_days}d",
+                note=f"Updated default free trial duration for new devices: {prev_days}d -> {new_days}d (non-retroactive)",
+            )
+
+    logger.info("[SETTING UPDATED] actor=%s key=trial_days %sd->%sd", actor, prev_days, new_days)
+    return {
+        "ok": True,
+        "trial_days": new_days,
+        "previous_trial_days": prev_days,
+        "updated_at": now.isoformat(),
+        "updated_by": actor,
+    }
+
+
+@app.get("/api/v1/admin/contact-messages")
+def list_contact_messages(
+    limit: int = Query(default=50, ge=1, le=200),
+    _auth: dict = Depends(_require_admin_api),
+):
+    """Admin-only: list support messages submitted from desktop apps (separate from payment submissions)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, license_key, device_id, message, client_timestamp, received_at, telegram_notified
+                FROM contact_messages
+                ORDER BY received_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "license_key": r.get("license_key"),
+            "device_id": str(r["device_id"]),
+            "message": str(r["message"]),
+            "client_timestamp": _iso_utc(r.get("client_timestamp")),
+            "received_at": _iso_utc(r.get("received_at")),
+            "telegram_notified": bool(r.get("telegram_notified", False)),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/", include_in_schema=False)
