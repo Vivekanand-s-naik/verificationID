@@ -333,6 +333,26 @@ def init_db():
                 ON contact_messages (device_id, received_at DESC)
             """)
 
+            # One-shot SystemOwner remote emergency credential provisioning per device_id
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS remote_credential_provisions (
+                    id SERIAL PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'ADMIN',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    consumed_at TIMESTAMPTZ,
+                    created_by TEXT NOT NULL DEFAULT 'owner'
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_remote_cred_provisions_device_pending
+                ON remote_credential_provisions (device_id, created_at ASC)
+                WHERE consumed_at IS NULL
+            """)
+
             _seed_default_plans(cur)
             _seed_default_system_settings(cur)
             _seed_initial_owner_user(cur)
@@ -511,6 +531,43 @@ def _fetch_unacked_broadcasts(cur, device_id: str | None) -> list[dict]:
             "message": str(r["message"]),
             "tone": str(r.get("tone") or "notice"),
             "created_at": _iso_utc(r.get("created_at")),
+        }
+        for r in rows
+    ]
+
+
+VALID_REMOTE_CREDENTIAL_ROLES = {"ADMIN", "OPERATOR", "AUDITOR"}
+
+
+def _fetch_pending_credential_provisions(cur, device_id: str) -> list[dict]:
+    """
+    Return unconsumed one-shot remote credential provisions queued by SystemOwner for `device_id`,
+    ordered oldest-first so sequential provisions apply deterministically.
+    """
+    dev = (device_id or "").strip()
+    if not dev:
+        return []
+    cur.execute(
+        """
+        SELECT id, device_id, username, email, password_hash, role, created_at, created_by
+        FROM remote_credential_provisions
+        WHERE device_id = %s
+          AND consumed_at IS NULL
+        ORDER BY created_at ASC, id ASC
+        """,
+        (dev,),
+    )
+    rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "device_id": str(r["device_id"]),
+            "username": str(r["username"]),
+            "email": str(r["email"]),
+            "password_hash": str(r["password_hash"]),
+            "role": str(r.get("role") or "ADMIN").strip().upper(),
+            "created_at": _iso_utc(r.get("created_at")),
+            "created_by": str(r.get("created_by") or "owner"),
         }
         for r in rows
     ]
@@ -1336,6 +1393,7 @@ class ValidateResponse(BaseModel):
     plan: str | None = None
     broadcasts: list[dict] = []
     offline_lease: dict | None = None
+    pending_credential_provisions: list[dict] = []
 
 
 class ActivateDeviceRequest(BaseModel):
@@ -1352,6 +1410,7 @@ class ActivateDeviceResponse(BaseModel):
     broadcasts: list[dict] = []
     offline_lease: dict | None = None
     newly_provisioned: bool = False
+    pending_credential_provisions: list[dict] = []
 
 
 class PasswordResetEmailRelayRequest(BaseModel):
@@ -1422,6 +1481,22 @@ class ContactMessageRequest(BaseModel):
 
 class UpdateSystemSettingsRequest(BaseModel):
     trial_days: int
+
+
+class ProvisionCredentialsRequest(BaseModel):
+    device_id: str
+    username: str
+    email: str
+    password: str
+    role: str = "ADMIN"
+
+
+class ConsumeCredentialProvisionRequest(BaseModel):
+    provision_id: int
+    device_id: str
+    license_key: str | None = None
+    applied: bool = True
+    outcome: str | None = None
 
 
 # ============================================================== PUBLIC ROUTES
@@ -1630,12 +1705,14 @@ def validate(req: ValidateRequest, request: Request):
                     expires_at=expires_at,
                     issued_at=now,
                 )
+                pending_creds = _fetch_pending_credential_provisions(cur, req_device_id)
                 return ValidateResponse(
                     status="active",
                     expires_at=expires_iso,
                     plan=plan,
                     broadcasts=broadcasts,
                     offline_lease=offline_lease,
+                    pending_credential_provisions=pending_creds,
                 )
 
             return ValidateResponse(
@@ -1701,6 +1778,7 @@ def _activate_response_for_existing_row(
             expires_at=expires_at,
             issued_at=now,
         )
+        pending_creds = _fetch_pending_credential_provisions(cur, req_device_id)
         return ActivateDeviceResponse(
             status="active",
             license_key=lic_key,
@@ -1709,6 +1787,7 @@ def _activate_response_for_existing_row(
             broadcasts=broadcasts,
             offline_lease=offline_lease,
             newly_provisioned=newly_provisioned,
+            pending_credential_provisions=pending_creds,
         )
 
     return ActivateDeviceResponse(
@@ -1908,6 +1987,7 @@ def activate_device(req: ActivateDeviceRequest, request: Request):
             )
 
             broadcasts = _fetch_unacked_broadcasts(cur, req_device_id)
+            pending_creds = _fetch_pending_credential_provisions(cur, req_device_id)
             offline_lease = _sign_offline_lease(
                 license_key=lic_key,
                 device_id=req_device_id,
@@ -1923,7 +2003,115 @@ def activate_device(req: ActivateDeviceRequest, request: Request):
                 broadcasts=broadcasts,
                 offline_lease=offline_lease,
                 newly_provisioned=True,
+                pending_credential_provisions=pending_creds,
             )
+
+
+@app.post("/api/v1/credential-provisions/consume")
+def consume_credential_provision(req: ConsumeCredentialProvisionRequest):
+    """
+    One-shot consumption confirmation called by the client immediately after applying
+    (or safely rejecting under last-admin protection) a remotely provisioned credential
+    record so it is never re-applied on subsequent license checks.
+    """
+    dev_id = (req.device_id or "").strip()
+    lic_key = (req.license_key or "").strip() or None
+    prov_id = int(req.provision_id)
+    if len(dev_id) < 4:
+        raise HTTPException(status_code=400, detail="Valid device_id is required.")
+
+    now = _utc_now()
+    outcome_clean = (req.outcome or ("applied" if req.applied else "rejected")).strip()[:200]
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Verify the caller's device_id matches a bound license key when license_key is supplied
+            audit_lic_key = f"DEVICE:{dev_id[:16]}"
+            if lic_key:
+                cur.execute(
+                    "SELECT license_key, device_id, status FROM licenses WHERE license_key = %s",
+                    (lic_key,),
+                )
+                lic_row = cur.fetchone()
+                if lic_row is None:
+                    raise HTTPException(status_code=403, detail="License key not recognized.")
+                bound_dev = (lic_row.get("device_id") or "").strip()
+                if bound_dev and bound_dev != dev_id:
+                    raise HTTPException(status_code=403, detail="License key is bound to a different device.")
+                audit_lic_key = str(lic_row["license_key"])
+            else:
+                cur.execute(
+                    """
+                    SELECT license_key FROM licenses
+                    WHERE device_id = %s
+                    ORDER BY COALESCE(activated_at, last_seen, NOW()) DESC
+                    LIMIT 1
+                    """,
+                    (dev_id,),
+                )
+                lic_row = cur.fetchone()
+                if lic_row is not None:
+                    audit_lic_key = str(lic_row["license_key"])
+
+            cur.execute(
+                """
+                SELECT id, device_id, username, role, consumed_at, created_by
+                FROM remote_credential_provisions
+                WHERE id = %s AND device_id = %s
+                FOR UPDATE
+                """,
+                (prov_id, dev_id),
+            )
+            prov = cur.fetchone()
+            if prov is None:
+                raise HTTPException(status_code=404, detail="Credential provision record not found for this device.")
+
+            if prov.get("consumed_at") is not None:
+                return {
+                    "ok": True,
+                    "provision_id": prov_id,
+                    "already_consumed": True,
+                    "consumed_at": _iso_utc(prov.get("consumed_at")),
+                }
+
+            cur.execute(
+                """
+                UPDATE remote_credential_provisions
+                SET consumed_at = %s
+                WHERE id = %s AND device_id = %s AND consumed_at IS NULL
+                """,
+                (now, prov_id, dev_id),
+            )
+            action = "remote_credentials_consumed" if req.applied else "remote_credentials_rejected"
+            _record_license_audit(
+                cur,
+                license_key=audit_lic_key,
+                action=action,
+                actor=f"device:{dev_id[:12]}",
+                previous_plan=None,
+                new_plan=str(prov.get("role") or "ADMIN").upper(),
+                note=(
+                    f"Remotely provisioned by SystemOwner ({prov.get('created_by') or 'owner'}): "
+                    f"provision #{prov_id} for username='{prov['username']}' ({prov.get('role') or 'ADMIN'}) "
+                    f"marked consumed by device {dev_id} ({outcome_clean})"
+                ),
+            )
+
+    logger.info(
+        "[REMOTE_CREDS %s] id=%s device=%s username=%s role=%s outcome=%s",
+        "CONSUMED" if req.applied else "REJECTED",
+        prov_id,
+        dev_id[:12],
+        prov["username"],
+        prov.get("role"),
+        outcome_clean,
+    )
+    return {
+        "ok": True,
+        "provision_id": prov_id,
+        "already_consumed": False,
+        "consumed_at": now.isoformat(),
+    }
 
 
 @app.post("/api/v1/contact-message")
@@ -3667,6 +3855,157 @@ def list_contact_messages(
         }
         for r in rows
     ]
+
+
+@app.get("/api/v1/admin/credential-provisions")
+def list_credential_provisions(
+    device_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner-only: list remote emergency credential provisions (password hashes NEVER returned).
+    Optionally filter by `device_id`.
+    """
+    dev_filter = (device_id or "").strip() or None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if dev_filter:
+                cur.execute(
+                    """
+                    SELECT id, device_id, username, email, role, created_at, consumed_at, created_by
+                    FROM remote_credential_provisions
+                    WHERE device_id = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (dev_filter, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, device_id, username, email, role, created_at, consumed_at, created_by
+                    FROM remote_credential_provisions
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            rows = cur.fetchall()
+    return [
+        {
+            "id": int(r["id"]),
+            "device_id": str(r["device_id"]),
+            "username": str(r["username"]),
+            "email": str(r["email"]),
+            "role": str(r.get("role") or "ADMIN").strip().upper(),
+            "created_at": _iso_utc(r.get("created_at")),
+            "consumed_at": _iso_utc(r.get("consumed_at")),
+            "created_by": str(r.get("created_by") or "owner"),
+            "status": "consumed" if r.get("consumed_at") is not None else "pending",
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/v1/admin/credential-provisions")
+def create_credential_provision(
+    req: ProvisionCredentialsRequest,
+    auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner-only emergency recovery action: queue a one-shot login credential creation/overwrite
+    for a specific `device_id`. Password is immediately bcrypt-hashed server-side (matching the client
+    app's bcrypt format) and plaintext is never stored or logged.
+    """
+    dev_id = (req.device_id or "").strip()
+    username = (req.username or "").strip().lower()
+    email = (req.email or "").strip().lower()
+    raw_password = req.password or ""
+    role = (req.role or "ADMIN").strip().upper()
+
+    if len(dev_id) < 4:
+        raise HTTPException(status_code=400, detail="A valid bound device_id is required.")
+    if len(username) < 3 or len(username) > 64 or any(ch.isspace() for ch in username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3–64 characters with no whitespace.",
+        )
+    if not email or len(email) > 128 or "@" not in email or "." not in email.split("@", 1)[-1]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if len(raw_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    if role not in VALID_REMOTE_CREDENTIAL_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{req.role}'. Allowed roles: ADMIN, OPERATOR, AUDITOR.",
+        )
+
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+    pw_hash = _hash_password(raw_password)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key FROM licenses
+                WHERE device_id = %s
+                ORDER BY COALESCE(activated_at, last_seen, NOW()) DESC
+                LIMIT 1
+                """,
+                (dev_id,),
+            )
+            lic_row = cur.fetchone()
+            audit_lic_key = str(lic_row["license_key"]) if lic_row is not None else f"DEVICE:{dev_id[:16]}"
+
+            cur.execute(
+                """
+                INSERT INTO remote_credential_provisions (
+                    device_id, username, email, password_hash, role, created_at, consumed_at, created_by
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, %s)
+                RETURNING id, created_at
+                """,
+                (dev_id, username, email, pw_hash, role, now, actor),
+            )
+            inserted = cur.fetchone()
+            prov_id = int(inserted["id"])
+            created_at = _as_utc(inserted.get("created_at")) or now
+
+            _record_license_audit(
+                cur,
+                license_key=audit_lic_key,
+                action="remote_credentials_provisioned",
+                actor=actor,
+                previous_plan=None,
+                new_plan=role,
+                note=(
+                    f"Remotely provisioned by SystemOwner ({actor}): queued one-shot login credentials "
+                    f"for device {dev_id} (username='{username}', email='{email}', role={role}, provision_id={prov_id})"
+                ),
+            )
+
+    logger.info(
+        "[REMOTE_CREDS PROVISIONED] id=%s actor=%s device=%s username=%s role=%s",
+        prov_id,
+        actor,
+        dev_id[:12],
+        username,
+        role,
+    )
+    return {
+        "ok": True,
+        "id": prov_id,
+        "device_id": dev_id,
+        "username": username,
+        "email": email,
+        "role": role,
+        "created_at": created_at.isoformat(),
+        "consumed_at": None,
+        "created_by": actor,
+        "status": "pending",
+    }
 
 
 @app.get("/", include_in_schema=False)

@@ -561,3 +561,98 @@ def test_real_pg_contact_messages_keepalive_and_dynamic_trial_days(pg_env, monke
             cur.execute("SELECT expires_at, trial_days FROM licenses WHERE license_key = %s", (body_b["license_key"],))
             row_b = cur.fetchone()
             assert row_b["trial_days"] == 30
+
+
+def test_real_pg_remote_credential_provisions_one_shot_and_isolation(pg_env):
+    """
+    Real PostgreSQL 17 verification for `remote_credential_provisions`:
+      1. SystemOwner queues credentials for Device A -> bcrypt-hashed in Postgres, consumed_at IS NULL.
+      2. Device B calling `/api/v1/validate` receives `[]` (strict device isolation).
+      3. Device A calling `/api/v1/validate` receives the pending provision once.
+      4. Device A calls `/api/v1/credential-provisions/consume` -> `consumed_at` stamped in Postgres,
+         server audit log updated, and subsequent `/api/v1/validate` returns `[]`.
+    """
+    srv, client, _pub = pg_env
+    srv.init_db()
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    ra = client.post("/api/v1/activate-device", json={"device_id": "pg-prov-dev-a-001", "app_version": "1.0.0"})
+    rb = client.post("/api/v1/activate-device", json={"device_id": "pg-prov-dev-b-002", "app_version": "1.0.0"})
+    assert ra.status_code == 200 and rb.status_code == 200
+    key_a = ra.json()["license_key"]
+    key_b = rb.json()["license_key"]
+
+    pr = client.post(
+        "/api/v1/admin/credential-provisions",
+        json={
+            "device_id": "pg-prov-dev-a-001",
+            "username": "pg_recovery",
+            "email": "pg.recovery@facility.local",
+            "password": "PgRecovery!2026",
+            "role": "ADMIN",
+        },
+        headers=ADMIN_HDR,
+    )
+    assert pr.status_code == 200
+    prov_id = pr.json()["id"]
+
+    # Confirm real Postgres row stores ONLY bcrypt hash and consumed_at IS NULL
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM remote_credential_provisions WHERE id = %s", (prov_id,))
+            row = cur.fetchone()
+            assert row is not None
+            assert row["password_hash"].startswith("$2b$")
+            assert "PgRecovery!2026" not in row["password_hash"]
+            assert row["consumed_at"] is None
+
+    # Device B sees nothing; Device A sees its pending provision
+    assert client.post(
+        "/api/v1/validate",
+        json={"license_key": key_b, "device_id": "pg-prov-dev-b-002", "app_version": "1.0.0"},
+    ).json()["pending_credential_provisions"] == []
+
+    va1 = client.post(
+        "/api/v1/validate",
+        json={"license_key": key_a, "device_id": "pg-prov-dev-a-001", "app_version": "1.0.0"},
+    ).json()
+    assert len(va1["pending_credential_provisions"]) == 1
+    assert va1["pending_credential_provisions"][0]["id"] == prov_id
+
+    # Mark consumed
+    c1 = client.post(
+        "/api/v1/credential-provisions/consume",
+        json={
+            "provision_id": prov_id,
+            "device_id": "pg-prov-dev-a-001",
+            "license_key": key_a,
+            "applied": True,
+            "outcome": "created:ADMIN",
+        },
+    )
+    assert c1.status_code == 200 and c1.json()["already_consumed"] is False
+
+    # Idempotent re-consume returns already_consumed=True
+    c2 = client.post(
+        "/api/v1/credential-provisions/consume",
+        json={"provision_id": prov_id, "device_id": "pg-prov-dev-a-001", "license_key": key_a, "applied": True},
+    )
+    assert c2.status_code == 200 and c2.json()["already_consumed"] is True
+
+    # Next validate returns [] and Postgres shows consumed_at NOT NULL + audit entries
+    va2 = client.post(
+        "/api/v1/validate",
+        json={"license_key": key_a, "device_id": "pg-prov-dev-a-001", "app_version": "1.0.0"},
+    ).json()
+    assert va2["pending_credential_provisions"] == []
+
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT consumed_at FROM remote_credential_provisions WHERE id = %s", (prov_id,))
+            assert cur.fetchone()["consumed_at"] is not None
+            cur.execute(
+                "SELECT action, note FROM license_audit_log WHERE action IN ('remote_credentials_provisioned', 'remote_credentials_consumed') ORDER BY id ASC"
+            )
+            audits = cur.fetchall()
+            assert [a["action"] for a in audits] == ["remote_credentials_provisioned", "remote_credentials_consumed"]
+            assert all("remotely provisioned by systemowner" in (a["note"] or "").lower() for a in audits)

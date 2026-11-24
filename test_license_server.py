@@ -52,11 +52,13 @@ class FakePostgresDB:
         self.broadcast_acks: set[tuple[int, str]] = set()
         self.system_settings: dict[str, dict] = {}
         self.contact_messages: list[dict] = []
+        self.remote_credential_provisions: list[dict] = []
         self._next_sub_id = 1
         self._next_admin_id = 1
         self._next_audit_id = 1
         self._next_broadcast_id = 1
         self._next_contact_id = 1
+        self._next_prov_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -662,6 +664,70 @@ class _FakeCursor:
             limit = int(params[0]) if params else 50
             ordered = sorted(self.db.contact_messages, key=lambda m: (m["received_at"], m["id"]), reverse=True)
             self._rows = [dict(m) for m in ordered[:limit]]
+            return
+
+        if "FROM remote_credential_provisions WHERE device_id = %s AND consumed_at IS NULL" in norm:
+            dev = params[0]
+            matches = [
+                dict(p)
+                for p in self.db.remote_credential_provisions
+                if p["device_id"] == dev and p.get("consumed_at") is None
+            ]
+            matches.sort(key=lambda p: (p["created_at"], p["id"]))
+            self._rows = matches
+            return
+
+        if "FROM remote_credential_provisions WHERE id = %s AND device_id = %s" in norm:
+            pid, dev = int(params[0]), params[1]
+            match = next(
+                (p for p in self.db.remote_credential_provisions if p["id"] == pid and p["device_id"] == dev),
+                None,
+            )
+            self._rows = [dict(match)] if match else []
+            return
+
+        if "FROM remote_credential_provisions WHERE device_id = %s ORDER BY created_at DESC" in norm:
+            dev, limit = params[0], int(params[1])
+            matches = [dict(p) for p in self.db.remote_credential_provisions if p["device_id"] == dev]
+            matches.sort(key=lambda p: (p["created_at"], p["id"]), reverse=True)
+            self._rows = matches[:limit]
+            return
+
+        if "FROM remote_credential_provisions ORDER BY created_at DESC" in norm:
+            limit = int(params[0]) if params else 100
+            ordered = sorted(
+                self.db.remote_credential_provisions,
+                key=lambda p: (p["created_at"], p["id"]),
+                reverse=True,
+            )
+            self._rows = [dict(p) for p in ordered[:limit]]
+            return
+
+        if norm.startswith("INSERT INTO remote_credential_provisions"):
+            dev_id, uname, email, pw_hash, role, created_at, created_by = params
+            row = {
+                "id": self.db._next_prov_id,
+                "device_id": dev_id,
+                "username": uname,
+                "email": email,
+                "password_hash": pw_hash,
+                "role": role,
+                "created_at": created_at,
+                "consumed_at": None,
+                "created_by": created_by,
+            }
+            self.db._next_prov_id += 1
+            self.db.remote_credential_provisions.append(row)
+            self._rows = [{"id": row["id"], "created_at": row["created_at"]}]
+            self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE remote_credential_provisions SET consumed_at = %s WHERE id = %s AND device_id = %s"):
+            cons_at, pid, dev_id = params
+            for p in self.db.remote_credential_provisions:
+                if p["id"] == int(pid) and p["device_id"] == dev_id and p.get("consumed_at") is None:
+                    p["consumed_at"] = cons_at
+                    self.rowcount = 1
             return
 
         raise AssertionError(f"Unhandled SQL in test fake: {norm}")
@@ -2234,3 +2300,147 @@ def test_dynamic_trial_days_settings_and_non_retroactive_auto_provisioning(env_c
     assert r_pc1_again.json()["expires_at"] == b_pc1["expires_at"]
     assert db.licenses[b_pc1["license_key"]]["trial_days"] == 7
     assert db.licenses[b_pc2["license_key"]]["trial_days"] == 30
+
+
+def test_remote_credential_provisioning_owner_only_one_shot_consume_and_audit(env_client):
+    """
+    Verify SystemOwner emergency remote credential provisioning:
+      - Owner-only access (non-owner staff admin receives 403)
+      - Password immediately bcrypt-hashed; plaintext never stored or returned in API responses
+      - Delivered ONLY to the targeted bound device via `/api/v1/validate` (never leaked to other devices)
+      - `/api/v1/credential-provisions/consume` rejects mismatched device/license key (403)
+      - Once consumed, `consumed_at` is stamped, audit entries recorded, and subsequent `/validate` returns []
+      - Dashboard HTML exposes "Provision Login Credentials" modal cleanly
+    """
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    # Bind two distinct devices via silent auto-provisioning
+    ra = client.post("/api/v1/activate-device", json={"device_id": "prov-dev-alpha-01", "app_version": "1.0.0"})
+    rb = client.post("/api/v1/activate-device", json={"device_id": "prov-dev-beta-02", "app_version": "1.0.0"})
+    assert ra.status_code == 200 and rb.status_code == 200
+    key_a = ra.json()["license_key"]
+    key_b = rb.json()["license_key"]
+
+    # Non-owner staff admin cannot create or list remote credential provisions (403)
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 92,
+        "username": "staff-no-prov",
+        "password_hash": srv._hash_password("StaffProv!92"),
+        "email": "staff92@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_login = client.post("/api/v1/admin/login", json={"username": "staff-no-prov", "password": "StaffProv!92"})
+    st_hdr = {"Authorization": f"Bearer {st_login.json()['token']}"}
+    assert client.get("/api/v1/admin/credential-provisions", headers=st_hdr).status_code == 403
+    assert client.post(
+        "/api/v1/admin/credential-provisions",
+        json={
+            "device_id": "prov-dev-alpha-01",
+            "username": "rescue_admin",
+            "email": "rescue@facility.local",
+            "password": "StrongPassword!1",
+            "role": "ADMIN",
+        },
+        headers=st_hdr,
+    ).status_code == 403
+    client.cookies.clear()
+
+    # SystemOwner queues one-shot credentials for Device Alpha
+    p_resp = client.post(
+        "/api/v1/admin/credential-provisions",
+        json={
+            "device_id": "prov-dev-alpha-01",
+            "username": "Rescue_Admin",
+            "email": "Rescue@Facility.Local",
+            "password": "EmergencyLogin!2026",
+            "role": "admin",
+        },
+        headers=ADMIN_HDR,
+    )
+    assert p_resp.status_code == 200
+    pb = p_resp.json()
+    prov_id = pb["id"]
+    assert pb["username"] == "rescue_admin"
+    assert pb["email"] == "rescue@facility.local"
+    assert pb["role"] == "ADMIN"
+    assert pb["consumed_at"] is None
+    assert "password" not in pb and "password_hash" not in pb
+
+    # Stored row in DB has bcrypt hash, NEVER plaintext
+    stored = db.remote_credential_provisions[0]
+    assert stored["password_hash"].startswith("$2b$")
+    assert "EmergencyLogin!2026" not in stored["password_hash"]
+    assert srv._verify_password("EmergencyLogin!2026", stored["password_hash"]) is True
+
+    # Server audit log clearly marks "Remotely provisioned by SystemOwner"
+    assert any(
+        a["action"] == "remote_credentials_provisioned"
+        and "remotely provisioned by systemowner" in (a.get("note") or "").lower()
+        for a in db.audit_log
+    )
+
+    # Device Beta's validate call MUST NOT receive Alpha's pending provision
+    vb = client.post("/api/v1/validate", json={"license_key": key_b, "device_id": "prov-dev-beta-02", "app_version": "1.0.0"})
+    assert vb.status_code == 200
+    assert vb.json()["pending_credential_provisions"] == []
+
+    # Device Alpha's validate call receives the exact pending provision
+    va = client.post("/api/v1/validate", json={"license_key": key_a, "device_id": "prov-dev-alpha-01", "app_version": "1.0.0"})
+    assert va.status_code == 200
+    pending_a = va.json()["pending_credential_provisions"]
+    assert len(pending_a) == 1
+    assert pending_a[0]["id"] == prov_id
+    assert pending_a[0]["username"] == "rescue_admin"
+    assert pending_a[0]["password_hash"] == stored["password_hash"]
+    assert pending_a[0]["role"] == "ADMIN"
+
+    # Spoofed consume with Beta's license key for Alpha's device -> 403
+    bad_consume = client.post(
+        "/api/v1/credential-provisions/consume",
+        json={"provision_id": prov_id, "device_id": "prov-dev-alpha-01", "license_key": key_b, "applied": True},
+    )
+    assert bad_consume.status_code == 403
+
+    # Legitimate consume from Device Alpha -> stamps consumed_at & logs server audit entry
+    ok_consume = client.post(
+        "/api/v1/credential-provisions/consume",
+        json={
+            "provision_id": prov_id,
+            "device_id": "prov-dev-alpha-01",
+            "license_key": key_a,
+            "applied": True,
+            "outcome": "created:ADMIN",
+        },
+    )
+    assert ok_consume.status_code == 200
+    assert ok_consume.json()["already_consumed"] is False
+    assert ok_consume.json()["consumed_at"] is not None
+
+    # Listing endpoint shows consumed_at set and NEVER exposes password_hash
+    lst = client.get("/api/v1/admin/credential-provisions", params={"device_id": "prov-dev-alpha-01"}, headers=ADMIN_HDR)
+    assert lst.status_code == 200
+    items = lst.json()
+    assert len(items) == 1
+    assert items[0]["status"] == "consumed" and items[0]["consumed_at"] is not None
+    assert "password_hash" not in items[0]
+
+    # Next validate on Device Alpha returns NO pending provisions (strictly one-shot!)
+    va2 = client.post("/api/v1/validate", json={"license_key": key_a, "device_id": "prov-dev-alpha-01", "app_version": "1.0.0"})
+    assert va2.status_code == 200
+    assert va2.json()["pending_credential_provisions"] == []
+
+    # Consumed audit entry exists on server
+    assert any(
+        a["action"] == "remote_credentials_consumed"
+        and "remotely provisioned by systemowner" in (a.get("note") or "").lower()
+        for a in db.audit_log
+    )
+
+    # Dashboard HTML contains the SystemOwner modal & action button
+    dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
+    assert "Provision Login Credentials" in dash_html
+    assert 'id="provision-creds-modal"' in dash_html

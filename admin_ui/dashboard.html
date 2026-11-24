@@ -1657,6 +1657,54 @@
     </div>
   </div>
 
+  <div id="provision-creds-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="prov-modal-title">
+    <div class="reset-modal-card" style="max-width: 520px;">
+      <div>
+        <div class="card-eyebrow">SystemOwner // Emergency Recovery Push</div>
+        <h2 id="prov-modal-title" class="card-title" style="margin-top:2px;">Provision Login Credentials</h2>
+      </div>
+      <div class="reset-preview" style="margin:0;">
+        <div><strong>Target License:</strong> <span id="prov-target-key" class="mono">—</span></div>
+        <div style="margin-top:3px;"><strong>Device ID:</strong> <span id="prov-target-device" class="mono">—</span></div>
+      </div>
+      <div class="reset-warning-box" style="border-color: var(--border); background: var(--surface-2); color: var(--text-soft);">
+        Queues a <strong>one-shot</strong> local account creation or password/role overwrite for this device.
+        Applied automatically on the device's next license check (startup, hourly, or <em>Retry Now</em>) — independent of SMTP/Telegram.
+        Once consumed, the account behaves like any normal local account.
+      </div>
+      <form id="provision-creds-form" style="display:flex; flex-direction:column; gap:10px;">
+        <div class="field" style="margin:0;">
+          <label for="prov-username">Username (creates new or overwrites existing)</label>
+          <input id="prov-username" type="text" required minlength="3" maxlength="64" placeholder="e.g. admin or recovery_admin" autocomplete="off" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="prov-email">Email Address</label>
+          <input id="prov-email" type="email" required maxlength="128" placeholder="operator@facility.local" autocomplete="off" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="prov-password">Temporary / Recovery Password (hashed immediately server-side)</label>
+          <div class="pw-input-wrap">
+            <input id="prov-password" type="password" required minlength="6" placeholder="Min 6 characters" autocomplete="new-password" />
+            <button type="button" class="pw-toggle" data-toggle-target="prov-password">Show</button>
+          </div>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="prov-role">Local RBAC Role</label>
+          <select id="prov-role" class="plan-select" style="width:100%; min-height:42px;">
+            <option value="ADMIN" selected>ADMIN (Full Console &amp; Account Management)</option>
+            <option value="OPERATOR">OPERATOR (Gate &amp; Camera Controls)</option>
+            <option value="AUDITOR">AUDITOR (Read-Only Logs &amp; Reports)</option>
+          </select>
+        </div>
+        <div id="prov-device-history" style="font-size:0.78rem; color:var(--text-muted); border-top:1px solid var(--border); padding-top:8px;"></div>
+        <div class="reset-modal-actions">
+          <button type="button" id="prov-modal-cancel" class="btn">Cancel</button>
+          <button type="submit" id="prov-modal-submit" class="btn btn-primary">Queue Provision</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="lightbox" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment screenshot preview">
     <div class="modal-content">
       <div class="modal-head">
@@ -1688,10 +1736,13 @@
         auditLog: [],
         broadcasts: [],
         adminPlans: [],
+        credentialProvisions: [],
         summary: null,
         accountData: null,
         licenseSearch: "",
         resetModalKey: null,
+        provisionModalKey: null,
+        provisionModalDevice: null,
       };
 
       const toastEl = document.getElementById("toast");
@@ -1917,6 +1968,14 @@
           const statusLabel = eff.charAt(0).toUpperCase() + eff.slice(1);
           const defaultPlan = state.plans && state.plans[lic.plan] ? lic.plan : "monthly";
           const isRevoked = (lic.status || "").toLowerCase() === "revoked";
+          const pendingProvCount = lic.device_id
+            ? (state.credentialProvisions || []).filter(function (p) {
+              return p.device_id === lic.device_id && !p.consumed_at;
+            }).length
+            : 0;
+          const pendingCredBadge = pendingProvCount > 0
+            ? ' <div><span class="badge badge-pending" style="margin-top:4px;">Pending Creds (' + escapeHtml(pendingProvCount) + ')</span></div>'
+            : '';
           const expiresCell = (!lic.expires_at && (lic.plan || "trial").toLowerCase() === "trial")
             ? '<span style="color:var(--text-muted);">Starts on activation (' + escapeHtml(lic.trial_days || 180) + 'd)</span>'
             : escapeHtml(formatDate(lic.expires_at));
@@ -1926,7 +1985,7 @@
             '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(statusLabel) + '</span></td>' +
             '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
             '<td data-label="Expires At" class="tabular">' + expiresCell + '</td>' +
-            '<td data-label="Device ID">' + (lic.device_id ? '<span class="mono">' + escapeHtml(lic.device_id) + '</span>' : '<span style="color:var(--text-muted);">Unbound</span>') + '</td>' +
+            '<td data-label="Device ID">' + (lic.device_id ? '<span class="mono">' + escapeHtml(lic.device_id) + '</span>' + pendingCredBadge : '<span style="color:var(--text-muted);">Unbound</span>') + '</td>' +
             '<td data-label="Last Seen" class="tabular">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
             '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
             '<td data-label="Actions">' +
@@ -1942,7 +2001,8 @@
             '<button type="button" class="btn btn-primary btn-sm" data-lic-action="renew" title="Extend on top of remaining time">Renew</button>' +
             '</div>' +
             ((state.session && state.session.is_owner && lic.device_id)
-              ? '<button type="button" class="btn btn-sm" data-lic-action="unbind-device" data-device-id="' + escapeHtml(lic.device_id) + '" title="Clear bound PC fingerprint so this license can be transferred to a replacement computer">Unbind Device</button>'
+              ? '<button type="button" class="btn btn-sm" data-lic-action="provision-credentials" data-device-id="' + escapeHtml(lic.device_id) + '" title="Emergency one-shot recovery: queue login credentials for this device">Provision Login Credentials</button>' +
+              '<button type="button" class="btn btn-sm" data-lic-action="unbind-device" data-device-id="' + escapeHtml(lic.device_id) + '" title="Clear bound PC fingerprint so this license can be transferred to a replacement computer">Unbind Device</button>'
               : '') +
             ((state.session && state.session.is_owner)
               ? '<button type="button" class="btn btn-handover btn-sm" data-lic-action="reset-plan" title="Discard elapsed time and start a fresh period from today (handover only)">&#8634; Reset Plan (Handover)</button>'
@@ -2279,15 +2339,18 @@
           const isTrialOverride = act === "trial_override";
           const isSetting = act === "setting_updated";
           const isPlanChange = act === "plan_created" || act === "plan_updated";
+          const isRemoteProv = act === "remote_credentials_provisioned";
+          const isRemoteConsumed = act === "remote_credentials_consumed";
+          const isRemoteRejected = act === "remote_credentials_rejected";
           const badgeCls = isReset
             ? "badge-handover"
-            : (isRevoked
+            : (isRevoked || isRemoteRejected
               ? "badge-revoked"
-              : (isUnbind || isTrialOverride
+              : (isUnbind || isTrialOverride || isRemoteProv
                 ? "badge-expired"
                 : (isSetting || isPlanChange
                   ? "badge-owner"
-                  : (isBound || isReactivated || isCreated ? "badge-active" : "badge-renew"))));
+                  : (isBound || isReactivated || isCreated || isRemoteConsumed ? "badge-active" : "badge-renew"))));
           const badgeTxt = isReset
             ? "HANDOVER RESET"
             : (isRevoked
@@ -2298,15 +2361,21 @@
                   ? "CREATED"
                   : (isTrialOverride
                     ? "TRIAL OVERRIDE"
-                    : (isSetting
-                      ? "SETTING UPDATED"
-                      : (isPlanChange
-                        ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
-                        : (isUnbind
-                          ? "DEVICE UNBOUND"
-                          : (isBound
-                            ? "DEVICE BOUND"
-                            : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))))));
+                    : (isRemoteProv
+                      ? "REMOTE CREDS QUEUED"
+                      : (isRemoteConsumed
+                        ? "REMOTE CREDS APPLIED"
+                        : (isRemoteRejected
+                          ? "REMOTE CREDS BLOCKED"
+                          : (isSetting
+                            ? "SETTING UPDATED"
+                            : (isPlanChange
+                              ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
+                              : (isUnbind
+                                ? "DEVICE UNBOUND"
+                                : (isBound
+                                  ? "DEVICE BOUND"
+                                  : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL"))))))))))));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -2376,6 +2445,64 @@
       function closeResetPlanModal() {
         state.resetModalKey = null;
         document.getElementById("reset-plan-modal").classList.remove("open");
+      }
+
+      function renderProvisionDeviceHistory(deviceId) {
+        const el = document.getElementById("prov-device-history");
+        if (!el) return;
+        const rows = (state.credentialProvisions || []).filter(function (p) {
+          return p.device_id === deviceId;
+        }).slice(0, 5);
+        if (!rows.length) {
+          el.innerHTML = '<span>No prior remote credential provisions for this device.</span>';
+          return;
+        }
+        el.innerHTML =
+          '<div style="font-weight:600; color:var(--text-soft); margin-bottom:5px;">Recent Provisions for This Device</div>' +
+          rows.map(function (p) {
+            const consumed = Boolean(p.consumed_at);
+            const stBadge = consumed
+              ? '<span class="badge badge-active">Consumed</span>'
+              : '<span class="badge badge-pending">Pending</span>';
+            const tsText = consumed
+              ? 'consumed ' + escapeHtml(formatDate(p.consumed_at))
+              : 'queued ' + escapeHtml(formatDate(p.created_at));
+            return (
+              '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:3px 0;">' +
+              '<span>' + stBadge + ' <strong class="mono">' + escapeHtml(p.username) + '</strong> (' + escapeHtml(p.role) + ')</span>' +
+              '<span style="font-size:0.74rem; color:var(--text-muted);">' + tsText + '</span>' +
+              '</div>'
+            );
+          }).join("");
+      }
+
+      function openProvisionCredsModal(licenseKey, deviceId) {
+        state.provisionModalKey = licenseKey;
+        state.provisionModalDevice = deviceId;
+        document.getElementById("prov-target-key").textContent = licenseKey || "—";
+        document.getElementById("prov-target-device").textContent = deviceId || "—";
+        document.getElementById("prov-username").value = "";
+        document.getElementById("prov-email").value = "";
+        document.getElementById("prov-password").value = "";
+        document.getElementById("prov-password").type = "password";
+        document.getElementById("prov-role").value = "ADMIN";
+        renderProvisionDeviceHistory(deviceId);
+        document.getElementById("provision-creds-modal").classList.add("open");
+      }
+
+      function closeProvisionCredsModal() {
+        state.provisionModalKey = null;
+        state.provisionModalDevice = null;
+        document.getElementById("provision-creds-modal").classList.remove("open");
+      }
+
+      async function loadCredentialProvisions() {
+        if (!(state.session && state.session.is_owner)) return;
+        state.credentialProvisions = await apiFetch("/api/v1/admin/credential-provisions?limit=150");
+        renderLicenses();
+        if (state.provisionModalDevice) {
+          renderProvisionDeviceHistory(state.provisionModalDevice);
+        }
       }
 
       async function loadAuditLog() {
@@ -2557,7 +2684,7 @@
 
         const jobs = [loadPending(), loadLicenses(), loadHistory(), loadAuditLog(), loadSummary()];
         if (session.is_owner) {
-          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans());
+          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions());
         }
         await Promise.all(jobs);
       }
@@ -2971,6 +3098,14 @@
           }
           url = "/api/v1/admin/renew?license_key=" + encodeURIComponent(licenseKey) +
             "&plan=" + encodeURIComponent(plan);
+        } else if (action === "provision-credentials") {
+          const boundDev = btn.dataset.deviceId || "";
+          if (!boundDev) {
+            showToast("This license is not bound to a device yet.", "error");
+            return;
+          }
+          openProvisionCredsModal(licenseKey, boundDev);
+          return;
         } else if (action === "unbind-device") {
           const boundDev = btn.dataset.deviceId || "this computer";
           if (!window.confirm("Unbind device " + boundDev + " from license " + licenseKey + "?\n\nThe next PC that activates this key will lock to it.")) {
@@ -3050,6 +3185,56 @@
         setActiveTab(tab);
       });
 
+      document.getElementById("prov-modal-cancel").addEventListener("click", closeProvisionCredsModal);
+      document.getElementById("provision-creds-modal").addEventListener("click", function (evt) {
+        if (evt.target.id === "provision-creds-modal") closeProvisionCredsModal();
+      });
+      document.getElementById("provision-creds-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const deviceId = state.provisionModalDevice;
+        if (!deviceId) return;
+        const username = document.getElementById("prov-username").value.trim();
+        const email = document.getElementById("prov-email").value.trim();
+        const password = document.getElementById("prov-password").value;
+        const role = document.getElementById("prov-role").value || "ADMIN";
+        const btn = document.getElementById("prov-modal-submit");
+        if (!username || username.length < 3) {
+          showToast("Username must be at least 3 characters.", "error");
+          return;
+        }
+        if (!password || password.length < 6) {
+          showToast("Password must be at least 6 characters.", "error");
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Queueing...";
+        try {
+          const res = await apiFetch("/api/v1/admin/credential-provisions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              device_id: deviceId,
+              username: username,
+              email: email,
+              password: password,
+              role: role,
+            }),
+          });
+          document.getElementById("prov-password").value = "";
+          await Promise.all([loadCredentialProvisions(), loadAuditLog()]);
+          showToast(
+            "Queued one-shot login credentials for '" + res.username + "' (" + res.role + ") on device " + deviceId.slice(0, 12) + ".",
+            "success"
+          );
+          closeProvisionCredsModal();
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Queue Provision";
+        }
+      });
+
       document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
       document.getElementById("lightbox").addEventListener("click", function (evt) {
         if (evt.target.id === "lightbox") closeLightbox();
@@ -3058,6 +3243,7 @@
         if (evt.key === "Escape") {
           closeLightbox();
           closeResetPlanModal();
+          closeProvisionCredsModal();
         }
       });
 
