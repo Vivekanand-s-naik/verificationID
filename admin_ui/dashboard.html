@@ -1371,6 +1371,9 @@
       <button type="button" id="tab-plans-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="plans">
         Plans &amp; Pricing
       </button>
+      <button type="button" id="tab-client-rbac-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="client-rbac">
+        Client Accounts (RBAC) <span id="client-rbac-count" class="count-pill">0</span>
+      </button>
       <button type="button" id="tab-account-btn" class="tab-btn hidden" role="tab" aria-selected="false" data-tab="account">
         Manage Admin Account
       </button>
@@ -1401,19 +1404,23 @@
         </div>
         <form id="create-license-form" class="form-grid">
           <div class="field">
+            <label for="new-license-label">Label (optional — display name)</label>
+            <input id="new-license-label" type="text" maxlength="120" placeholder="e.g. Vivek's Dev PC, Customer — Main Gate" />
+          </div>
+          <div class="field">
             <label for="new-license-key">License Key (optional — auto-generated if blank)</label>
             <input id="new-license-key" type="text" placeholder="Leave blank for secure random key" />
           </div>
           <div class="field">
             <label for="new-license-note">Note (optional)</label>
-            <input id="new-license-note" type="text" placeholder="Customer or gate location" />
+            <input id="new-license-note" type="text" placeholder="Additional customer details" />
           </div>
           <button type="submit" id="create-license-btn" class="btn btn-primary">Create License</button>
         </form>
       </div>
 
       <div class="toolbar">
-        <input id="license-search" class="search-input" type="search" placeholder="Filter by key, device ID, or note..."
+        <input id="license-search" class="search-input" type="search" placeholder="Filter by label, key, device ID, or note..."
           aria-label="Filter licenses" />
       </div>
       <div id="licenses-container"></div>
@@ -1552,7 +1559,34 @@
       </div>
     </section>
 
-    <!-- TAB 7: MANAGE ADMIN ACCOUNT (SYSTEM OWNER ONLY) -->
+    <!-- TAB 7: CLIENT ACCOUNTS / RBAC CREDENTIAL MANAGEMENT (SYSTEM OWNER ONLY) -->
+    <section id="panel-client-rbac" class="panel" role="tabpanel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">SystemOwner // Client RBAC Directory &amp; One-Time Password Push</div>
+            <h2 class="card-title">Client Login Credentials (RBAC)</h2>
+            <p class="card-subtitle">
+              View known devices alongside their license labels and local RBAC accounts (usernames, emails, and roles).
+              Passwords remain strictly bcrypt-hashed and are never stored or displayed in plaintext.
+              Pushing a new one-time password reveals it <strong>once</strong> for handoff and forces password rotation on the user's next login.
+            </p>
+          </div>
+          <span class="badge badge-owner">System Owner</span>
+        </div>
+        <div class="toolbar" style="margin-bottom:0;">
+          <input id="rbac-device-search" class="search-input" type="search"
+            placeholder="Filter by label, license key, device ID, username, or email..."
+            aria-label="Filter client RBAC devices" />
+        </div>
+      </div>
+
+      <div id="client-rbac-container">
+        <div class="empty-state">Loading client RBAC devices...</div>
+      </div>
+    </section>
+
+    <!-- TAB 8: MANAGE ADMIN ACCOUNT (SYSTEM OWNER ONLY) -->
     <section id="panel-account" class="panel" role="tabpanel">
       <div class="account-layout">
         <div class="card">
@@ -1657,20 +1691,84 @@
     </div>
   </div>
 
-  <div id="provision-creds-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="prov-modal-title">
+  <div id="edit-label-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-label-title">
+    <div class="reset-modal-card" style="max-width: 480px;">
+      <div>
+        <div class="card-eyebrow">License Identification</div>
+        <h2 id="edit-label-title" class="card-title" style="margin-top:2px;">Edit License Label</h2>
+      </div>
+      <div class="reset-preview" style="margin:0;">
+        <div><strong>License Key:</strong> <span id="edit-label-key" class="mono">—</span></div>
+      </div>
+      <form id="edit-label-form" style="display:flex; flex-direction:column; gap:10px;">
+        <div class="field" style="margin:0;">
+          <label for="edit-label-input">Display Label (leave blank to clear)</label>
+          <input id="edit-label-input" type="text" maxlength="120" placeholder="e.g. Vivek's Dev PC, Customer — Main Gate" autocomplete="off" />
+        </div>
+        <div class="reset-modal-actions">
+          <button type="button" id="edit-label-cancel" class="btn">Cancel</button>
+          <button type="submit" id="edit-label-save" class="btn btn-primary">Save Label</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="delete-license-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
     <div class="reset-modal-card" style="max-width: 520px;">
       <div>
-        <div class="card-eyebrow">SystemOwner // Emergency Recovery Push</div>
+        <div class="card-eyebrow">Destructive Action // Hard Delete</div>
+        <h2 id="delete-modal-title" class="card-title" style="margin-top:2px;">Delete License</h2>
+      </div>
+
+      <div id="delete-step-1" style="display:flex; flex-direction:column; gap:12px;">
+        <div class="reset-preview" style="margin:0;">
+          <div><strong>Label:</strong> <span id="del-target-label">—</span></div>
+          <div style="margin-top:3px;"><strong>License Key:</strong> <span id="del-target-key" class="mono">—</span></div>
+          <div style="margin-top:3px;"><strong>Plan / Status:</strong> <span id="del-target-plan">—</span></div>
+          <div style="margin-top:3px;"><strong>Bound Device ID:</strong> <span id="del-target-device" class="mono">—</span></div>
+        </div>
+        <div class="reset-warning-box" style="border-color: var(--red-border); background: var(--red-bg); color: var(--red-text);">
+          <strong>Step 1 of 2 — Hard Delete License Row:</strong> This permanently removes the license record from the database.
+          Deleting the license alone does <strong>not</strong> clear the <span class="mono">device_trials</span> record, so one-trial-per-device protection remains intact unless you explicitly clear it in Step 2.
+        </div>
+        <div class="reset-modal-actions">
+          <button type="button" id="delete-step1-cancel" class="btn">Cancel</button>
+          <button type="button" id="delete-step1-confirm" class="btn btn-danger">Delete License Permanently</button>
+        </div>
+      </div>
+
+      <div id="delete-step-2" style="display:none; flex-direction:column; gap:12px;">
+        <div class="inline-status visible ok" style="margin:0;">
+          License <strong id="del-done-key" class="mono"></strong> has been permanently deleted.
+        </div>
+        <div class="reset-warning-box">
+          <strong>Step 2 of 2 (Optional) — Clear Trial History for Device:</strong><br />
+          Device <span id="del-done-device" class="mono"></span> still has an entry in <span class="mono">device_trials</span>, which blocks it from receiving another free trial on next launch.
+          Only clear this trial record if you deliberately want this PC to get a fresh trial (e.g. testing or authorized reissue).
+        </div>
+        <div class="reset-modal-actions">
+          <button type="button" id="delete-step2-done" class="btn">Done (Keep Trial Block)</button>
+          <button type="button" id="delete-step2-clear-trial" class="btn btn-danger">Clear Trial Record (Allow Fresh Trial)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="provision-creds-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="prov-modal-title">
+    <div class="reset-modal-card" style="max-width: 540px;">
+      <div>
+        <div class="card-eyebrow">SystemOwner // Client RBAC Credential Push</div>
         <h2 id="prov-modal-title" class="card-title" style="margin-top:2px;">Provision Login Credentials</h2>
       </div>
       <div class="reset-preview" style="margin:0;">
+        <div id="prov-target-label-row" style="display:none; margin-bottom:3px;"><strong>License Label:</strong> <span id="prov-target-label">—</span></div>
         <div><strong>Target License:</strong> <span id="prov-target-key" class="mono">—</span></div>
         <div style="margin-top:3px;"><strong>Device ID:</strong> <span id="prov-target-device" class="mono">—</span></div>
       </div>
-      <div class="reset-warning-box" style="border-color: var(--border); background: var(--surface-2); color: var(--text-soft);">
-        Queues a <strong>one-shot</strong> local account creation or password/role overwrite for this device.
-        Applied automatically on the device's next license check (startup, hourly, or <em>Retry Now</em>) — independent of SMTP/Telegram.
-        Once consumed, the account behaves like any normal local account.
+      <div class="reset-warning-box" style="border-color: var(--border); background: var(--surface-subtle); color: var(--text-soft);">
+        Queues a <strong>one-shot</strong> local account creation or one-time password overwrite for this device.
+        The password is bcrypt-hashed immediately server-side, never stored in plaintext, shown <strong>once</strong> after submission,
+        and applied automatically on the device's next license check (startup, hourly, or <em>Retry Now</em>).
       </div>
       <form id="provision-creds-form" style="display:flex; flex-direction:column; gap:10px;">
         <div class="field" style="margin:0;">
@@ -1682,9 +1780,9 @@
           <input id="prov-email" type="email" required maxlength="128" placeholder="operator@facility.local" autocomplete="off" />
         </div>
         <div class="field" style="margin:0;">
-          <label for="prov-password">Temporary / Recovery Password (hashed immediately server-side)</label>
+          <label for="prov-password">One-Time Password (optional — leave blank to auto-generate strong password)</label>
           <div class="pw-input-wrap">
-            <input id="prov-password" type="password" required minlength="6" placeholder="Min 6 characters" autocomplete="new-password" />
+            <input id="prov-password" type="password" minlength="6" placeholder="Leave blank to auto-generate, or enter min 6 chars" autocomplete="new-password" />
             <button type="button" class="pw-toggle" data-toggle-target="prov-password">Show</button>
           </div>
         </div>
@@ -1696,12 +1794,38 @@
             <option value="AUDITOR">AUDITOR (Read-Only Logs &amp; Reports)</option>
           </select>
         </div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; color:var(--text-soft); cursor:pointer;">
+          <input id="prov-must-change" type="checkbox" checked style="width:auto; min-height:auto;" />
+          <span>Require password change on next login (<span class="mono">must_change_password = true</span>)</span>
+        </label>
         <div id="prov-device-history" style="font-size:0.78rem; color:var(--text-muted); border-top:1px solid var(--border); padding-top:8px;"></div>
         <div class="reset-modal-actions">
           <button type="button" id="prov-modal-cancel" class="btn">Cancel</button>
-          <button type="submit" id="prov-modal-submit" class="btn btn-primary">Queue Provision</button>
+          <button type="submit" id="prov-modal-submit" class="btn btn-primary">Generate &amp; Queue Provision</button>
         </div>
       </form>
+
+      <div id="prov-otp-result" style="display:none; flex-direction:column; gap:10px;">
+        <div class="inline-status visible ok" style="margin:0;">
+          One-shot credential provision queued for <strong id="prov-otp-user" class="mono"></strong> (<span id="prov-otp-role"></span>).
+        </div>
+        <div style="border:1px solid var(--amber-border); background:var(--amber-bg); border-radius:var(--radius-sm); padding:12px;">
+          <div style="font-size:0.76rem; font-weight:600; color:var(--amber-text); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:6px;">
+            One-Time Password (Shown Once Only — Copy Now)
+          </div>
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <code id="prov-otp-value" class="mono" style="font-size:1.02rem; font-weight:700; color:var(--text); background:var(--surface); border:1px solid var(--border-strong); padding:6px 10px; border-radius:var(--radius-sm); user-select:all;"></code>
+            <button type="button" id="prov-otp-copy-btn" class="btn btn-primary btn-sm">Copy Password</button>
+          </div>
+          <div id="prov-otp-note" style="margin-top:8px; font-size:0.78rem; color:#78350f;">
+            This password is stored only as a bcrypt hash and will never be displayed again after you close this dialog.
+            The user will be required to rotate it immediately upon next login.
+          </div>
+        </div>
+        <div class="reset-modal-actions">
+          <button type="button" id="prov-otp-done-btn" class="btn btn-primary">Done &amp; Clear from Screen</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1737,12 +1861,19 @@
         broadcasts: [],
         adminPlans: [],
         credentialProvisions: [],
+        deviceRbacAccounts: [],
         summary: null,
         accountData: null,
         licenseSearch: "",
+        rbacSearch: "",
         resetModalKey: null,
+        editLabelModalKey: null,
+        deleteModalLic: null,
+        deleteStep2Key: null,
+        deleteStep2Device: null,
         provisionModalKey: null,
         provisionModalDevice: null,
+        provisionModalLabel: null,
       };
 
       const toastEl = document.getElementById("toast");
@@ -1848,7 +1979,7 @@
       }
 
       function setActiveTab(tabName) {
-        if ((tabName === "account" || tabName === "announcements" || tabName === "plans") && !(state.session && state.session.is_owner)) {
+        if ((tabName === "account" || tabName === "announcements" || tabName === "plans" || tabName === "client-rbac") && !(state.session && state.session.is_owner)) {
           return;
         }
         state.activeTab = tabName;
@@ -1866,6 +1997,8 @@
           loadBroadcasts().catch(function () { });
         } else if (tabName === "plans") {
           loadAdminPlans().catch(function () { });
+        } else if (tabName === "client-rbac") {
+          loadDeviceRbacAccounts().catch(function () { });
         }
       }
 
@@ -1951,6 +2084,7 @@
         const filtered = state.licenses.filter(function (lic) {
           if (!query) return true;
           return (
+            (lic.label || "").toLowerCase().includes(query) ||
             (lic.license_key || "").toLowerCase().includes(query) ||
             (lic.device_id || "").toLowerCase().includes(query) ||
             (lic.note || "").toLowerCase().includes(query)
@@ -1979,9 +2113,12 @@
           const expiresCell = (!lic.expires_at && (lic.plan || "trial").toLowerCase() === "trial")
             ? '<span style="color:var(--text-muted);">Starts on activation (' + escapeHtml(lic.trial_days || 180) + 'd)</span>'
             : escapeHtml(formatDate(lic.expires_at));
+          const labelHeading = lic.label
+            ? '<div style="font-weight:600; color:var(--text); margin-bottom:2px;">' + escapeHtml(lic.label) + '</div>'
+            : '<div style="font-size:0.74rem; color:var(--text-muted); margin-bottom:2px;">Unlabeled</div>';
           return (
             '<tr data-license-key="' + escapeHtml(lic.license_key) + '">' +
-            '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
+            '<td data-label="License / Label">' + labelHeading + '<strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
             '<td data-label="Status"><span class="badge ' + badgeCls + '">' + escapeHtml(statusLabel) + '</span></td>' +
             '<td data-label="Plan">' + escapeHtml(lic.plan || "trial") + '</td>' +
             '<td data-label="Expires At" class="tabular">' + expiresCell + '</td>' +
@@ -1990,6 +2127,7 @@
             '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
             '<td data-label="Actions">' +
             '<div class="row-actions">' +
+            '<button type="button" class="btn btn-sm" data-lic-action="edit-label" title="Set or update human-friendly display label">Edit Label</button>' +
             (isRevoked
               ? '<button type="button" class="btn btn-success btn-sm" data-lic-action="reactivate">Reactivate</button>'
               : '<button type="button" class="btn btn-danger-outline btn-sm" data-lic-action="revoke">Revoke</button>' +
@@ -2007,6 +2145,7 @@
             ((state.session && state.session.is_owner)
               ? '<button type="button" class="btn btn-handover btn-sm" data-lic-action="reset-plan" title="Discard elapsed time and start a fresh period from today (handover only)">&#8634; Reset Plan (Handover)</button>'
               : '') +
+            '<button type="button" class="btn btn-danger-outline btn-sm" data-lic-action="delete-license" title="Hard-delete this license row (optional separate trial-clear step follows)">Delete License</button>' +
             '</div>' +
             '</td>' +
             '</tr>'
@@ -2017,7 +2156,7 @@
           '<div class="table-wrap">' +
           '<table class="ops-table lic-table">' +
           '<thead><tr>' +
-          '<th>License Key</th>' +
+          '<th>License / Label</th>' +
           '<th>Status</th>' +
           '<th>Plan</th>' +
           '<th>Expires At</th>' +
@@ -2191,7 +2330,9 @@
 
         const summaryLine = isGood
           ? (p
-            ? 'Primary: <span class="mono"><strong>' + escapeHtml(p.license_key) + '</strong></span> · ' +
+            ? 'Primary: ' + (p.label ? '<strong>' + escapeHtml(p.label) + '</strong> (' : '') +
+              '<span class="mono"><strong>' + escapeHtml(p.license_key) + '</strong></span>' +
+              (p.label ? ')' : '') + ' · ' +
               escapeHtml(p.plan_label || p.plan || "Active") +
               (p.expires_date ? ' · valid through <span class="tabular">' + escapeHtml(p.expires_date) + '</span>' : '')
             : "All licenses operational and payment queue clear.")
@@ -2241,7 +2382,7 @@
             '</div>' +
             '<table class="ops-table">' +
             '<thead><tr>' +
-            '<th>License Key</th>' +
+            '<th>License / Label</th>' +
             '<th>Plan</th>' +
             '<th>Status</th>' +
             '<th>Expires</th>' +
@@ -2255,9 +2396,12 @@
               const remStr = lic.days_remaining !== null && lic.days_remaining !== undefined
                 ? lic.days_remaining + "d left"
                 : "Active";
+              const labelPart = lic.label
+                ? '<div style="font-weight:600; color:var(--text); margin-bottom:2px;">' + escapeHtml(lic.label) + '</div>'
+                : '';
               return (
                 '<tr>' +
-                '<td data-label="License Key"><strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
+                '<td data-label="License / Label">' + labelPart + '<strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
                 '<td data-label="Plan">' + escapeHtml(lic.plan_label || lic.plan || "—") + '</td>' +
                 '<td data-label="Status"><span class="badge badge-active">Active</span></td>' +
                 '<td data-label="Expires" class="tabular">' + escapeHtml(lic.expires_date || "—") + '</td>' +
@@ -2336,6 +2480,8 @@
           const isRevoked = act === "revoked";
           const isReactivated = act === "reactivated";
           const isCreated = act === "license_created";
+          const isDeleted = act === "license_deleted";
+          const isLabelUpdated = act === "label_updated";
           const isTrialOverride = act === "trial_override";
           const isSetting = act === "setting_updated";
           const isPlanChange = act === "plan_created" || act === "plan_updated";
@@ -2344,38 +2490,42 @@
           const isRemoteRejected = act === "remote_credentials_rejected";
           const badgeCls = isReset
             ? "badge-handover"
-            : (isRevoked || isRemoteRejected
+            : (isRevoked || isDeleted || isRemoteRejected
               ? "badge-revoked"
               : (isUnbind || isTrialOverride || isRemoteProv
                 ? "badge-expired"
-                : (isSetting || isPlanChange
+                : (isSetting || isPlanChange || isLabelUpdated
                   ? "badge-owner"
                   : (isBound || isReactivated || isCreated || isRemoteConsumed ? "badge-active" : "badge-renew"))));
           const badgeTxt = isReset
             ? "HANDOVER RESET"
-            : (isRevoked
-              ? "REVOKED"
-              : (isReactivated
-                ? "REACTIVATED"
-                : (isCreated
-                  ? "CREATED"
-                  : (isTrialOverride
-                    ? "TRIAL OVERRIDE"
-                    : (isRemoteProv
-                      ? "REMOTE CREDS QUEUED"
-                      : (isRemoteConsumed
-                        ? "REMOTE CREDS APPLIED"
-                        : (isRemoteRejected
-                          ? "REMOTE CREDS BLOCKED"
-                          : (isSetting
-                            ? "SETTING UPDATED"
-                            : (isPlanChange
-                              ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
-                              : (isUnbind
-                                ? "DEVICE UNBOUND"
-                                : (isBound
-                                  ? "DEVICE BOUND"
-                                  : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL"))))))))))));
+            : (isDeleted
+              ? "LICENSE DELETED"
+              : (isLabelUpdated
+                ? "LABEL UPDATED"
+                : (isRevoked
+                  ? "REVOKED"
+                  : (isReactivated
+                    ? "REACTIVATED"
+                    : (isCreated
+                      ? "CREATED"
+                      : (isTrialOverride
+                        ? "TRIAL OVERRIDE"
+                        : (isRemoteProv
+                          ? "REMOTE CREDS QUEUED"
+                          : (isRemoteConsumed
+                            ? "REMOTE CREDS APPLIED"
+                            : (isRemoteRejected
+                              ? "REMOTE CREDS BLOCKED"
+                              : (isSetting
+                                ? "SETTING UPDATED"
+                                : (isPlanChange
+                                  ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
+                                  : (isUnbind
+                                    ? "DEVICE UNBOUND"
+                                    : (isBound
+                                      ? "DEVICE BOUND"
+                                      : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL"))))))))))))));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -2476,16 +2626,85 @@
           }).join("");
       }
 
-      function openProvisionCredsModal(licenseKey, deviceId) {
+      function openEditLabelModal(licenseKey, currentLabel) {
+        state.editLabelModalKey = licenseKey;
+        document.getElementById("edit-label-key").textContent = licenseKey || "—";
+        const input = document.getElementById("edit-label-input");
+        input.value = currentLabel || "";
+        document.getElementById("edit-label-modal").classList.add("open");
+        setTimeout(function () { input.focus(); input.select(); }, 30);
+      }
+
+      function closeEditLabelModal() {
+        state.editLabelModalKey = null;
+        document.getElementById("edit-label-modal").classList.remove("open");
+      }
+
+      function openDeleteLicenseModal(lic) {
+        state.deleteModalLic = lic;
+        state.deleteStep2Key = null;
+        state.deleteStep2Device = null;
+        document.getElementById("del-target-label").textContent = (lic && lic.label) ? lic.label : "Unlabeled";
+        document.getElementById("del-target-key").textContent = (lic && lic.license_key) || "—";
+        document.getElementById("del-target-plan").textContent = ((lic && lic.plan) || "trial") + " · " + ((lic && lic.status) || "active");
+        document.getElementById("del-target-device").textContent = (lic && lic.device_id) ? lic.device_id : "Unbound";
+        document.getElementById("delete-step-1").style.display = "flex";
+        document.getElementById("delete-step-2").style.display = "none";
+        document.getElementById("delete-license-modal").classList.add("open");
+      }
+
+      function showDeleteStep2(licenseKey, deviceId) {
+        state.deleteModalLic = null;
+        state.deleteStep2Key = licenseKey;
+        state.deleteStep2Device = deviceId;
+        document.getElementById("del-done-key").textContent = licenseKey || "—";
+        document.getElementById("del-done-device").textContent = deviceId || "—";
+        const clearBtn = document.getElementById("delete-step2-clear-trial");
+        if (clearBtn) {
+          const isOwner = Boolean(state.session && state.session.is_owner);
+          clearBtn.style.display = isOwner ? "" : "none";
+          clearBtn.disabled = false;
+          clearBtn.textContent = "Clear Trial Record (Allow Fresh Trial)";
+        }
+        document.getElementById("delete-step-1").style.display = "none";
+        document.getElementById("delete-step-2").style.display = "flex";
+      }
+
+      function closeDeleteLicenseModal() {
+        state.deleteModalLic = null;
+        state.deleteStep2Key = null;
+        state.deleteStep2Device = null;
+        document.getElementById("delete-license-modal").classList.remove("open");
+      }
+
+      function openProvisionCredsModal(licenseKey, deviceId, preset) {
+        const opts = preset || {};
         state.provisionModalKey = licenseKey;
         state.provisionModalDevice = deviceId;
-        document.getElementById("prov-target-key").textContent = licenseKey || "—";
+        state.provisionModalLabel = opts.label || null;
+        const lblRow = document.getElementById("prov-target-label-row");
+        const lblVal = document.getElementById("prov-target-label");
+        if (lblRow && lblVal) {
+          if (opts.label) {
+            lblVal.textContent = opts.label;
+            lblRow.style.display = "block";
+          } else {
+            lblVal.textContent = "—";
+            lblRow.style.display = "none";
+          }
+        }
+        document.getElementById("prov-target-key").textContent = licenseKey || "Unlinked Device";
         document.getElementById("prov-target-device").textContent = deviceId || "—";
-        document.getElementById("prov-username").value = "";
-        document.getElementById("prov-email").value = "";
+        document.getElementById("prov-username").value = opts.username || "";
+        document.getElementById("prov-email").value = opts.email || "";
         document.getElementById("prov-password").value = "";
         document.getElementById("prov-password").type = "password";
-        document.getElementById("prov-role").value = "ADMIN";
+        document.getElementById("prov-role").value = opts.role || "ADMIN";
+        const mcBox = document.getElementById("prov-must-change");
+        if (mcBox) mcBox.checked = true;
+        document.getElementById("provision-creds-form").style.display = "flex";
+        document.getElementById("prov-otp-result").style.display = "none";
+        document.getElementById("prov-otp-value").textContent = "";
         renderProvisionDeviceHistory(deviceId);
         document.getElementById("provision-creds-modal").classList.add("open");
       }
@@ -2493,7 +2712,134 @@
       function closeProvisionCredsModal() {
         state.provisionModalKey = null;
         state.provisionModalDevice = null;
+        state.provisionModalLabel = null;
+        document.getElementById("prov-password").value = "";
+        document.getElementById("prov-otp-value").textContent = "";
+        document.getElementById("provision-creds-form").style.display = "flex";
+        document.getElementById("prov-otp-result").style.display = "none";
         document.getElementById("provision-creds-modal").classList.remove("open");
+      }
+
+      function renderDeviceRbacAccounts() {
+        const list = state.deviceRbacAccounts || [];
+        const pill = document.getElementById("client-rbac-count");
+        if (pill) pill.textContent = String(list.length);
+        const root = document.getElementById("client-rbac-container");
+        if (!root) return;
+
+        const q = (state.rbacSearch || "").trim().toLowerCase();
+        const filtered = list.filter(function (dev) {
+          if (!q) return true;
+          if ((dev.label || "").toLowerCase().includes(q)) return true;
+          if ((dev.license_key || "").toLowerCase().includes(q)) return true;
+          if ((dev.device_id || "").toLowerCase().includes(q)) return true;
+          return (dev.accounts || []).some(function (a) {
+            return (a.username || "").toLowerCase().includes(q) || (a.email || "").toLowerCase().includes(q);
+          });
+        });
+
+        if (!filtered.length) {
+          root.innerHTML = '<div class="empty-state">No bound client devices or synced RBAC accounts match your filter yet.</div>';
+          return;
+        }
+
+        root.innerHTML = filtered.map(function (dev) {
+          const accts = dev.accounts || [];
+          const provs = (dev.provisions || []).slice(0, 4);
+          const pendingCnt = provs.filter(function (p) { return !p.consumed_at; }).length;
+          const titleLabel = dev.label ? escapeHtml(dev.label) : '<span style="color:var(--text-muted);">Unlabeled Device</span>';
+          const statusTxt = (dev.status || "active").toLowerCase();
+          const statusCls = statusTxt === "revoked" ? "badge-revoked" : (statusTxt === "expired" ? "badge-expired" : "badge-active");
+
+          const acctRowsHtml = accts.length
+            ? (
+              '<div class="table-wrap" style="margin-top:8px;">' +
+              '<table class="ops-table">' +
+              '<thead><tr>' +
+              '<th>Username</th>' +
+              '<th>Email</th>' +
+              '<th>Role</th>' +
+              '<th>Status</th>' +
+              '<th>Rotation</th>' +
+              '<th>Action</th>' +
+              '</tr></thead>' +
+              '<tbody>' +
+              accts.map(function (a) {
+                const roleCls = a.role === "ADMIN" ? "badge-owner" : "badge-admin";
+                const activeCls = a.is_active ? "badge-active" : "badge-revoked";
+                const rotBadge = a.must_change_password
+                  ? '<span class="badge badge-pending">Must Rotate</span>'
+                  : '<span style="color:var(--text-muted); font-size:0.78rem;">Normal</span>';
+                return (
+                  '<tr>' +
+                  '<td data-label="Username"><strong class="mono">' + escapeHtml(a.username) + '</strong></td>' +
+                  '<td data-label="Email" class="mono">' + escapeHtml(a.email || "—") + '</td>' +
+                  '<td data-label="Role"><span class="badge ' + roleCls + '">' + escapeHtml(a.role) + '</span></td>' +
+                  '<td data-label="Status"><span class="badge ' + activeCls + '">' + (a.is_active ? "Active" : "Disabled") + '</span></td>' +
+                  '<td data-label="Rotation">' + rotBadge + '</td>' +
+                  '<td data-label="Action">' +
+                  '<button type="button" class="btn btn-primary btn-sm" data-rbac-action="push-otp" ' +
+                  'data-device-id="' + escapeHtml(dev.device_id) + '" ' +
+                  'data-license-key="' + escapeHtml(dev.license_key || "") + '" ' +
+                  'data-label="' + escapeHtml(dev.label || "") + '" ' +
+                  'data-username="' + escapeHtml(a.username) + '" ' +
+                  'data-email="' + escapeHtml(a.email || "") + '" ' +
+                  'data-role="' + escapeHtml(a.role || "ADMIN") + '">' +
+                  'Push One-Time Password</button>' +
+                  '</td>' +
+                  '</tr>'
+                );
+              }).join("") +
+              '</tbody></table></div>'
+            )
+            : '<div style="font-size:0.83rem; color:var(--text-muted); padding:8px 0;">No local RBAC accounts synced from this device yet. You can still push a recovery account below.</div>';
+
+          const provStrip = provs.length
+            ? (
+              '<div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--border); font-size:0.78rem; color:var(--text-muted);">' +
+              '<strong style="color:var(--text-soft);">Recent One-Shot Pushes:</strong> ' +
+              provs.map(function (p) {
+                const st = p.consumed_at
+                  ? '<span class="badge badge-active">Consumed</span>'
+                  : '<span class="badge badge-pending">Pending</span>';
+                return st + ' <span class="mono">' + escapeHtml(p.username) + '</span> (' + escapeHtml(p.role) + ')';
+              }).join(' &nbsp;·&nbsp; ') +
+              '</div>'
+            )
+            : '';
+
+          return (
+            '<div class="card">' +
+            '<div class="card-head">' +
+            '<div>' +
+            '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">' +
+            '<h3 class="card-title" style="margin:0;">' + titleLabel + '</h3>' +
+            (dev.license_key ? '<span class="badge ' + statusCls + '">' + escapeHtml(statusTxt.toUpperCase()) + '</span>' : '') +
+            (dev.plan ? '<span class="badge badge-admin">' + escapeHtml(dev.plan) + '</span>' : '') +
+            (pendingCnt > 0 ? '<span class="badge badge-pending">Pending Push (' + escapeHtml(pendingCnt) + ')</span>' : '') +
+            '</div>' +
+            '<div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">' +
+            'Device: <span class="mono">' + escapeHtml(dev.device_id) + '</span>' +
+            (dev.license_key ? ' &middot; License: <span class="mono">' + escapeHtml(dev.license_key) + '</span>' : '') +
+            (dev.last_seen ? ' &middot; Last seen ' + escapeHtml(formatDate(dev.last_seen)) : '') +
+            '</div>' +
+            '</div>' +
+            '<button type="button" class="btn btn-sm" data-rbac-action="provision-new" ' +
+            'data-device-id="' + escapeHtml(dev.device_id) + '" ' +
+            'data-license-key="' + escapeHtml(dev.license_key || "") + '" ' +
+            'data-label="' + escapeHtml(dev.label || "") + '">+ Push New / Recovery Credentials</button>' +
+            '</div>' +
+            acctRowsHtml +
+            provStrip +
+            '</div>'
+          );
+        }).join("");
+      }
+
+      async function loadDeviceRbacAccounts() {
+        if (!(state.session && state.session.is_owner)) return;
+        state.deviceRbacAccounts = await apiFetch("/api/v1/admin/device-rbac-accounts");
+        renderDeviceRbacAccounts();
       }
 
       async function loadCredentialProvisions() {
@@ -2672,7 +3018,7 @@
           "Signed in as " + (session.username || "admin") +
           (session.expires_at ? " · Session expires " + formatDate(session.expires_at) : "");
 
-        ["tab-account-btn", "tab-announcements-btn", "tab-plans-btn"].forEach(function (id) {
+        ["tab-account-btn", "tab-announcements-btn", "tab-plans-btn", "tab-client-rbac-btn"].forEach(function (id) {
           const el = document.getElementById(id);
           if (el) el.classList.toggle("hidden", !isOwner);
         });
@@ -2684,7 +3030,7 @@
 
         const jobs = [loadPending(), loadLicenses(), loadHistory(), loadAuditLog(), loadSummary()];
         if (session.is_owner) {
-          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions());
+          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions(), loadDeviceRbacAccounts());
         }
         await Promise.all(jobs);
       }
@@ -2997,9 +3343,11 @@
 
       document.getElementById("create-license-form").addEventListener("submit", async function (evt) {
         evt.preventDefault();
+        const labelInput = document.getElementById("new-license-label");
         const keyInput = document.getElementById("new-license-key");
         const noteInput = document.getElementById("new-license-note");
         const btn = document.getElementById("create-license-btn");
+        const label = labelInput ? labelInput.value.trim() : "";
         const licenseKey = keyInput.value.trim();
         const note = noteInput.value.trim();
 
@@ -3008,14 +3356,19 @@
           const created = await apiFetch("/api/v1/admin/create", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ license_key: licenseKey || null, note: note || null }),
+            body: JSON.stringify({
+              license_key: licenseKey || null,
+              note: note || null,
+              label: label || null,
+            }),
           });
+          if (labelInput) labelInput.value = "";
           keyInput.value = "";
           noteInput.value = "";
           await Promise.all([loadLicenses(), loadAuditLog()]);
           loadSummary().catch(function () { });
           const finalKey = (created && created.license_key) || licenseKey;
-          showToast("Created license " + finalKey, "success");
+          showToast("Created license " + (label ? label + " (" + finalKey + ")" : finalKey), "success");
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
         } finally {
@@ -3081,6 +3434,16 @@
         if (!licenseKey) return;
         const action = btn.dataset.licAction;
 
+        if (action === "edit-label") {
+          const licObj = state.licenses.find(function (l) { return l.license_key === licenseKey; });
+          openEditLabelModal(licenseKey, licObj ? licObj.label : "");
+          return;
+        } else if (action === "delete-license") {
+          const licObj = state.licenses.find(function (l) { return l.license_key === licenseKey; });
+          openDeleteLicenseModal(licObj || { license_key: licenseKey });
+          return;
+        }
+
         if (action === "revoke" && !window.confirm("Revoke license " + licenseKey + "?")) {
           return;
         }
@@ -3104,7 +3467,8 @@
             showToast("This license is not bound to a device yet.", "error");
             return;
           }
-          openProvisionCredsModal(licenseKey, boundDev);
+          const licObj = state.licenses.find(function (l) { return l.license_key === licenseKey; });
+          openProvisionCredsModal(licenseKey, boundDev, { label: licObj ? licObj.label : "" });
           return;
         } else if (action === "unbind-device") {
           const boundDev = btn.dataset.deviceId || "this computer";
@@ -3185,7 +3549,139 @@
         setActiveTab(tab);
       });
 
+      document.getElementById("edit-label-cancel").addEventListener("click", closeEditLabelModal);
+      document.getElementById("edit-label-modal").addEventListener("click", function (evt) {
+        if (evt.target.id === "edit-label-modal") closeEditLabelModal();
+      });
+      document.getElementById("edit-label-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const key = state.editLabelModalKey;
+        if (!key) return;
+        const label = document.getElementById("edit-label-input").value.trim();
+        const btn = document.getElementById("edit-label-save");
+        btn.disabled = true;
+        btn.textContent = "Saving...";
+        try {
+          await apiFetch(
+            "/api/v1/admin/label?license_key=" + encodeURIComponent(key) + "&label=" + encodeURIComponent(label),
+            { method: "POST" }
+          );
+          closeEditLabelModal();
+          await Promise.all([loadLicenses(), loadSummary(), loadAuditLog()]);
+          if (state.session && state.session.is_owner) {
+            loadDeviceRbacAccounts().catch(function () { });
+          }
+          showToast(label ? "Updated label for " + key + " → " + label : "Cleared label for " + key, "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Save Label";
+        }
+      });
+
+      document.getElementById("delete-step1-cancel").addEventListener("click", closeDeleteLicenseModal);
+      document.getElementById("delete-step2-done").addEventListener("click", closeDeleteLicenseModal);
+      document.getElementById("delete-license-modal").addEventListener("click", function (evt) {
+        if (evt.target.id === "delete-license-modal") closeDeleteLicenseModal();
+      });
+      document.getElementById("delete-step1-confirm").addEventListener("click", async function () {
+        const lic = state.deleteModalLic;
+        if (!lic || !lic.license_key) return;
+        const btn = document.getElementById("delete-step1-confirm");
+        btn.disabled = true;
+        btn.textContent = "Deleting...";
+        try {
+          const res = await apiFetch(
+            "/api/v1/admin/delete?license_key=" + encodeURIComponent(lic.license_key),
+            { method: "POST" }
+          );
+          await Promise.all([loadLicenses(), loadSummary(), loadAuditLog()]);
+          if (state.session && state.session.is_owner) {
+            loadDeviceRbacAccounts().catch(function () { });
+          }
+          if (res.had_device_trial && res.previous_device_id) {
+            showDeleteStep2(res.license_key, res.previous_device_id);
+            showToast("Deleted license " + res.license_key + ". Trial record still active unless cleared in Step 2.", "success");
+          } else {
+            closeDeleteLicenseModal();
+            showToast("Deleted license " + res.license_key + ".", "success");
+          }
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Delete License Permanently";
+        }
+      });
+      document.getElementById("delete-step2-clear-trial").addEventListener("click", async function () {
+        const devId = state.deleteStep2Device;
+        const delKey = state.deleteStep2Key;
+        if (!devId) return;
+        const btn = document.getElementById("delete-step2-clear-trial");
+        btn.disabled = true;
+        btn.textContent = "Clearing Trial Record...";
+        try {
+          await apiFetch("/api/v1/admin/device-trials/override", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              device_id: devId,
+              note: "Explicitly cleared device_trials after deleting license " + (delKey || ""),
+            }),
+          });
+          await loadAuditLog();
+          closeDeleteLicenseModal();
+          showToast("Cleared trial record for " + devId.slice(0, 12) + " — device can now auto-provision a fresh trial.", "success");
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "Clear Trial Record (Allow Fresh Trial)";
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        }
+      });
+
+      const rbacSearchEl = document.getElementById("rbac-device-search");
+      if (rbacSearchEl) {
+        rbacSearchEl.addEventListener("input", function (evt) {
+          state.rbacSearch = evt.target.value || "";
+          renderDeviceRbacAccounts();
+        });
+      }
+      const rbacContainerEl = document.getElementById("client-rbac-container");
+      if (rbacContainerEl) {
+        rbacContainerEl.addEventListener("click", function (evt) {
+          const btn = evt.target.closest("button[data-rbac-action]");
+          if (!btn) return;
+          const action = btn.dataset.rbacAction;
+          const devId = btn.dataset.deviceId || "";
+          const licKey = btn.dataset.licenseKey || "";
+          const label = btn.dataset.label || "";
+          if (!devId) return;
+          if (action === "push-otp") {
+            openProvisionCredsModal(licKey, devId, {
+              label: label,
+              username: btn.dataset.username || "",
+              email: btn.dataset.email || "",
+              role: btn.dataset.role || "ADMIN",
+            });
+          } else if (action === "provision-new") {
+            openProvisionCredsModal(licKey, devId, { label: label });
+          }
+        });
+      }
+
       document.getElementById("prov-modal-cancel").addEventListener("click", closeProvisionCredsModal);
+      document.getElementById("prov-otp-done-btn").addEventListener("click", closeProvisionCredsModal);
+      document.getElementById("prov-otp-copy-btn").addEventListener("click", async function () {
+        const otp = document.getElementById("prov-otp-value").textContent || "";
+        if (!otp) return;
+        try {
+          await navigator.clipboard.writeText(otp);
+          showToast("Copied one-time password to clipboard.", "success");
+        } catch (_e) {
+          showToast("Select and copy the password manually.", "error");
+        }
+      });
       document.getElementById("provision-creds-modal").addEventListener("click", function (evt) {
         if (evt.target.id === "provision-creds-modal") closeProvisionCredsModal();
       });
@@ -3197,13 +3693,15 @@
         const email = document.getElementById("prov-email").value.trim();
         const password = document.getElementById("prov-password").value;
         const role = document.getElementById("prov-role").value || "ADMIN";
+        const mcBox = document.getElementById("prov-must-change");
+        const mustChange = mcBox ? Boolean(mcBox.checked) : true;
         const btn = document.getElementById("prov-modal-submit");
         if (!username || username.length < 3) {
           showToast("Username must be at least 3 characters.", "error");
           return;
         }
-        if (!password || password.length < 6) {
-          showToast("Password must be at least 6 characters.", "error");
+        if (password && password.length < 6) {
+          showToast("Password must be at least 6 characters (or leave blank to auto-generate).", "error");
           return;
         }
         btn.disabled = true;
@@ -3216,22 +3714,30 @@
               device_id: deviceId,
               username: username,
               email: email,
-              password: password,
+              password: password ? password : null,
               role: role,
+              must_change_password: mustChange,
             }),
           });
           document.getElementById("prov-password").value = "";
-          await Promise.all([loadCredentialProvisions(), loadAuditLog()]);
+          await Promise.all([loadCredentialProvisions(), loadDeviceRbacAccounts(), loadAuditLog()]);
+          document.getElementById("prov-otp-user").textContent = res.username || username;
+          document.getElementById("prov-otp-role").textContent = res.role || role;
+          document.getElementById("prov-otp-value").textContent = res.one_time_password || "";
+          document.getElementById("prov-otp-note").textContent = res.must_change_password
+            ? "This password is stored only as a bcrypt hash and will never be displayed again after closing this dialog. The user will be required to change it immediately on next login."
+            : "This password is stored only as a bcrypt hash and will never be displayed again after closing this dialog.";
+          document.getElementById("provision-creds-form").style.display = "none";
+          document.getElementById("prov-otp-result").style.display = "flex";
           showToast(
-            "Queued one-shot login credentials for '" + res.username + "' (" + res.role + ") on device " + deviceId.slice(0, 12) + ".",
+            "Queued one-time password for '" + res.username + "' (" + res.role + ") on device " + deviceId.slice(0, 12) + ".",
             "success"
           );
-          closeProvisionCredsModal();
         } catch (err) {
           if (err.message !== "Session expired") showToast(err.message, "error");
         } finally {
           btn.disabled = false;
-          btn.textContent = "Queue Provision";
+          btn.textContent = "Generate & Queue Provision";
         }
       });
 
@@ -3243,6 +3749,8 @@
         if (evt.key === "Escape") {
           closeLightbox();
           closeResetPlanModal();
+          closeEditLabelModal();
+          closeDeleteLicenseModal();
           closeProvisionCredsModal();
         }
       });

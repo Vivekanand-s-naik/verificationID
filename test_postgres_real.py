@@ -656,3 +656,125 @@ def test_real_pg_remote_credential_provisions_one_shot_and_isolation(pg_env):
             audits = cur.fetchall()
             assert [a["action"] for a in audits] == ["remote_credentials_provisioned", "remote_credentials_consumed"]
             assert all("remotely provisioned by systemowner" in (a["note"] or "").lower() for a in audits)
+
+
+def test_real_pg_label_delete_trial_clear_and_rbac_directory_end_to_end(pg_env):
+    """
+    Real PostgreSQL 17 end-to-end verification for all three new additions:
+      1. License label saved in Postgres `licenses.label`, returned in `/admin/list` & `/admin/summary`.
+      2. Hard-delete via `POST /api/v1/admin/delete` removes license row while keeping `device_trials`
+         (so device receives `trial_already_used`), then explicit `POST /api/v1/admin/device-trials/override`
+         clears the trial block and allows fresh device auto-provisioning!
+      3. Client RBAC directory sync (`POST /api/v1/device-rbac/sync`) + owner portal listing
+         (`GET /api/v1/admin/device-rbac-accounts`, zero passwords) + one-time password push
+         (`password=None` auto-gen, `must_change_password=TRUE` in Postgres, bcrypt hash only).
+    """
+    srv, client, _pub = pg_env
+    srv.init_db()
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    # 1. Auto-provision device + set label
+    act1 = client.post("/api/v1/activate-device", json={"device_id": "pg-3feat-pc-001", "app_version": "1.0.0"})
+    assert act1.status_code == 200
+    key1 = act1.json()["license_key"]
+
+    lbl = client.post(
+        "/api/v1/admin/label",
+        params={"license_key": key1, "label": "Vivek's Dev PC"},
+        headers=ADMIN_HDR,
+    )
+    assert lbl.status_code == 200 and lbl.json()["label"] == "Vivek's Dev PC"
+
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT label FROM licenses WHERE license_key = %s", (key1,))
+            assert cur.fetchone()["label"] == "Vivek's Dev PC"
+
+    lst = client.get("/api/v1/admin/list", headers=ADMIN_HDR).json()
+    assert next(r for r in lst if r["license_key"] == key1)["label"] == "Vivek's Dev PC"
+    summ = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    assert next(r for r in summ["active_licenses"] if r["license_key"] == key1)["label"] == "Vivek's Dev PC"
+
+    # 2. Delete license (Step 1: default keeps device_trials -> blocks repeat trial!)
+    del_r = client.post("/api/v1/admin/delete", params={"license_key": key1}, headers=ADMIN_HDR)
+    assert del_r.status_code == 200
+    assert del_r.json()["had_device_trial"] is True
+    assert del_r.json()["device_trial_cleared"] is False
+
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM licenses WHERE license_key = %s", (key1,))
+            assert cur.fetchone() is None
+            cur.execute("SELECT 1 FROM device_trials WHERE device_id = 'pg-3feat-pc-001'")
+            assert cur.fetchone() is not None
+
+    assert client.post(
+        "/api/v1/activate-device", json={"device_id": "pg-3feat-pc-001", "app_version": "1.0.0"}
+    ).json()["status"] == "trial_already_used"
+
+    # Step 2 (Explicit clear): clear device_trials -> device gets a fresh trial license!
+    ov = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": "pg-3feat-pc-001", "note": "Explicit reset for re-provisioning test"},
+        headers=ADMIN_HDR,
+    )
+    assert ov.status_code == 200 and ov.json()["cleared"] is True
+
+    act2 = client.post("/api/v1/activate-device", json={"device_id": "pg-3feat-pc-001", "app_version": "1.0.0"})
+    assert act2.status_code == 200
+    assert act2.json()["status"] == "active" and act2.json()["newly_provisioned"] is True
+    key2 = act2.json()["license_key"]
+    assert key2 != key1
+    client.post("/api/v1/admin/label", params={"license_key": key2, "label": "Vivek's Dev PC (Fresh)"}, headers=ADMIN_HDR)
+
+    # 3. Sync RBAC roster + inspect owner portal + push auto-generated one-time password
+    sync_r = client.post(
+        "/api/v1/device-rbac/sync",
+        json={
+            "license_key": key2,
+            "device_id": "pg-3feat-pc-001",
+            "accounts": [
+                {"username": "admin", "email": "admin@dev.local", "role": "ADMIN", "is_active": True, "must_change_password": False},
+                {"username": "auditor1", "email": "auditor@dev.local", "role": "AUDITOR", "is_active": True, "must_change_password": False},
+            ],
+        },
+    )
+    assert sync_r.status_code == 200 and sync_r.json()["synced_count"] == 2
+
+    dir_r = client.get("/api/v1/admin/device-rbac-accounts", headers=ADMIN_HDR)
+    assert dir_r.status_code == 200
+    dev_rec = next(d for d in dir_r.json() if d["device_id"] == "pg-3feat-pc-001")
+    assert dev_rec["label"] == "Vivek's Dev PC (Fresh)"
+    assert {a["username"] for a in dev_rec["accounts"]} == {"admin", "auditor1"}
+
+    # Push auto-generated one-time password
+    push = client.post(
+        "/api/v1/admin/credential-provisions",
+        json={
+            "device_id": "pg-3feat-pc-001",
+            "username": "admin",
+            "email": "admin@dev.local",
+            "password": None,
+            "role": "ADMIN",
+        },
+        headers=ADMIN_HDR,
+    )
+    assert push.status_code == 200
+    pb = push.json()
+    otp = pb["one_time_password"]
+    assert otp.startswith("Tmp!") and pb["must_change_password"] is True
+
+    # Real Postgres row stores bcrypt hash + must_change_password=TRUE, NEVER plaintext
+    with psycopg2.connect(REAL_PG_URL, cursor_factory=psycopg2.extras.RealDictCursor) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT password_hash, must_change_password FROM remote_credential_provisions WHERE id = %s", (pb["id"],))
+            row = cur.fetchone()
+            assert row["password_hash"].startswith("$2b$")
+            assert otp not in row["password_hash"]
+            assert row["must_change_password"] is True
+            cur.execute("SELECT must_change_password FROM device_rbac_accounts WHERE device_id = 'pg-3feat-pc-001' AND username = 'admin'")
+            assert cur.fetchone()["must_change_password"] is True
+
+    # GET endpoints NEVER return the one-time password
+    dir_after = client.get("/api/v1/admin/device-rbac-accounts", headers=ADMIN_HDR).json()
+    assert otp not in json.dumps(dir_after)

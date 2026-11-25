@@ -125,6 +125,7 @@ def init_db():
                     app_version TEXT,
                     last_seen TIMESTAMPTZ,
                     note TEXT,
+                    label TEXT,
                     expires_at TIMESTAMPTZ,
                     plan TEXT NOT NULL DEFAULT 'trial',
                     has_paid_renewal BOOLEAN NOT NULL DEFAULT FALSE,
@@ -134,6 +135,7 @@ def init_db():
                 )
             """)
             # Idempotent column upgrades for existing Neon Postgres databases
+            cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS label TEXT")
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'trial'")
             cur.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS has_paid_renewal BOOLEAN NOT NULL DEFAULT FALSE")
@@ -341,15 +343,31 @@ def init_db():
                     email TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'ADMIN',
+                    must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     consumed_at TIMESTAMPTZ,
                     created_by TEXT NOT NULL DEFAULT 'owner'
                 )
             """)
+            cur.execute("ALTER TABLE remote_credential_provisions ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT TRUE")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_remote_cred_provisions_device_pending
                 ON remote_credential_provisions (device_id, created_at ASC)
                 WHERE consumed_at IS NULL
+            """)
+
+            # Non-sensitive directory of local RBAC accounts reported per device_id (NEVER stores passwords or hashes)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS device_rbac_accounts (
+                    device_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'OPERATOR',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (device_id, username)
+                )
             """)
 
             _seed_default_plans(cur)
@@ -548,7 +566,7 @@ def _fetch_pending_credential_provisions(cur, device_id: str) -> list[dict]:
         return []
     cur.execute(
         """
-        SELECT id, device_id, username, email, password_hash, role, created_at, created_by
+        SELECT id, device_id, username, email, password_hash, role, must_change_password, created_at, created_by
         FROM remote_credential_provisions
         WHERE device_id = %s
           AND consumed_at IS NULL
@@ -565,11 +583,19 @@ def _fetch_pending_credential_provisions(cur, device_id: str) -> list[dict]:
             "email": str(r["email"]),
             "password_hash": str(r["password_hash"]),
             "role": str(r.get("role") or "ADMIN").strip().upper(),
+            "must_change_password": bool(r.get("must_change_password", True)),
             "created_at": _iso_utc(r.get("created_at")),
             "created_by": str(r.get("created_by") or "owner"),
         }
         for r in rows
     ]
+
+
+def _generate_one_time_password() -> str:
+    """Generate a high-entropy human-typeable one-time recovery password (>= 14 chars)."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    parts = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
+    return f"Tmp!{'-'.join(parts)}"
 
 
 def _seed_initial_owner_user(cur) -> bool:
@@ -1454,6 +1480,7 @@ class UpdatePlanRequest(BaseModel):
 class CreateLicenseRequest(BaseModel):
     license_key: str | None = None
     note: str | None = None
+    label: str | None = None
     plan: str = "trial"
     days: int | None = None
     allow_repeat_trial: bool = False
@@ -1486,8 +1513,9 @@ class ProvisionCredentialsRequest(BaseModel):
     device_id: str
     username: str
     email: str
-    password: str
+    password: str | None = None
     role: str = "ADMIN"
+    must_change_password: bool = True
 
 
 class ConsumeCredentialProvisionRequest(BaseModel):
@@ -1496,6 +1524,20 @@ class ConsumeCredentialProvisionRequest(BaseModel):
     license_key: str | None = None
     applied: bool = True
     outcome: str | None = None
+
+
+class DeviceRbacAccountItem(BaseModel):
+    username: str
+    email: str
+    role: str = "OPERATOR"
+    is_active: bool = True
+    must_change_password: bool = False
+
+
+class SyncDeviceRbacRequest(BaseModel):
+    license_key: str
+    device_id: str
+    accounts: list[DeviceRbacAccountItem] = []
 
 
 # ============================================================== PUBLIC ROUTES
@@ -2110,6 +2152,74 @@ def consume_credential_provision(req: ConsumeCredentialProvisionRequest):
         "provision_id": prov_id,
         "already_consumed": False,
         "consumed_at": now.isoformat(),
+    }
+
+
+@app.post("/api/v1/device-rbac/sync")
+def sync_device_rbac_accounts(req: SyncDeviceRbacRequest):
+    """
+    Sync a bound device's non-sensitive local RBAC account roster (username, email, role,
+    active state, must_change_password flag) to `device_rbac_accounts` so SystemOwner can
+    view known device accounts in the portal and push one-time passwords without ever
+    storing or transmitting passwords/hashes from the client.
+    """
+    lic_key = (req.license_key or "").strip()
+    dev_id = (req.device_id or "").strip()
+    if not lic_key or len(dev_id) < 4:
+        raise HTTPException(status_code=400, detail="license_key and valid device_id are required.")
+
+    now = _utc_now()
+    cleaned: list[tuple[str, str, str, bool, bool]] = []
+    seen_users: set[str] = set()
+    for acct in (req.accounts or [])[:100]:
+        uname = (acct.username or "").strip().lower()
+        email = (acct.email or "").strip().lower()
+        role = (acct.role or "OPERATOR").strip().upper()
+        if not uname or len(uname) > 64 or uname in seen_users:
+            continue
+        if role not in VALID_REMOTE_CREDENTIAL_ROLES:
+            role = "OPERATOR"
+        seen_users.add(uname)
+        cleaned.append((uname, email[:128], role, bool(acct.is_active), bool(acct.must_change_password)))
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT license_key, device_id, status FROM licenses WHERE license_key = %s",
+                (lic_key,),
+            )
+            lic_row = cur.fetchone()
+            if lic_row is None:
+                raise HTTPException(status_code=403, detail="License key not recognized.")
+            if (lic_row.get("status") or "").strip().lower() == "revoked":
+                raise HTTPException(status_code=403, detail="License is revoked.")
+            bound_dev = (lic_row.get("device_id") or "").strip()
+            if bound_dev != dev_id:
+                raise HTTPException(status_code=403, detail="License key is not bound to this device.")
+
+            cur.execute("DELETE FROM device_rbac_accounts WHERE device_id = %s", (dev_id,))
+            for uname, email, role, is_active, must_change in cleaned:
+                cur.execute(
+                    """
+                    INSERT INTO device_rbac_accounts (
+                        device_id, username, email, role, is_active, must_change_password, last_synced_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (device_id, username) DO UPDATE
+                    SET email = EXCLUDED.email,
+                        role = EXCLUDED.role,
+                        is_active = EXCLUDED.is_active,
+                        must_change_password = EXCLUDED.must_change_password,
+                        last_synced_at = EXCLUDED.last_synced_at
+                    """,
+                    (dev_id, uname, email, role, is_active, must_change, now),
+                )
+
+    return {
+        "ok": True,
+        "device_id": dev_id,
+        "synced_count": len(cleaned),
+        "synced_at": now.isoformat(),
     }
 
 
@@ -2854,20 +2964,21 @@ def create_license(req: CreateLicenseRequest, auth: dict = Depends(_require_admi
             expires_at = None if plan_key == "trial" else (_utc_now() + timedelta(days=duration_days))
             trial_days = duration_days if plan_key == "trial" else configured_trial_days
 
+            clean_label = (req.label or "").strip()[:120] or None
             explicit_key = (req.license_key or "").strip()
             if explicit_key:
                 lic_key = explicit_key
                 cur.execute(
                     """
                     INSERT INTO licenses (
-                        license_key, status, note, plan, expires_at,
+                        license_key, status, note, label, plan, expires_at,
                         has_paid_renewal, activated_at, trial_days, allow_repeat_trial
                     )
-                    VALUES (%s, 'active', %s, %s, %s, %s, NULL, %s, %s)
+                    VALUES (%s, 'active', %s, %s, %s, %s, %s, NULL, %s, %s)
                     ON CONFLICT (license_key) DO NOTHING
                     RETURNING license_key
                     """,
-                    (lic_key, req.note, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
+                    (lic_key, req.note, clean_label, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
                 )
                 if cur.fetchone() is None:
                     raise HTTPException(
@@ -2881,14 +2992,14 @@ def create_license(req: CreateLicenseRequest, auth: dict = Depends(_require_admi
                     cur.execute(
                         """
                         INSERT INTO licenses (
-                            license_key, status, note, plan, expires_at,
+                            license_key, status, note, label, plan, expires_at,
                             has_paid_renewal, activated_at, trial_days, allow_repeat_trial
                         )
-                        VALUES (%s, 'active', %s, %s, %s, %s, NULL, %s, %s)
+                        VALUES (%s, 'active', %s, %s, %s, %s, %s, NULL, %s, %s)
                         ON CONFLICT (license_key) DO NOTHING
                         RETURNING license_key
                         """,
-                        (candidate, req.note, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
+                        (candidate, req.note, clean_label, plan_key, expires_at, has_paid, trial_days, bool(req.allow_repeat_trial)),
                     )
                     if cur.fetchone() is not None:
                         lic_key = candidate
@@ -2912,17 +3023,172 @@ def create_license(req: CreateLicenseRequest, auth: dict = Depends(_require_admi
                     or (f"Created {trial_days}d trial key (starts on activation)" if plan_key == "trial" else f"Created {plan_key} key ({duration_days}d)")
                 ),
             )
-            logger.info("[LICENSE CREATED] actor=%s key=%s plan=%s starts_on_activation=%s", actor, lic_key, plan_key, expires_at is None)
+            logger.info("[LICENSE CREATED] actor=%s key=%s label=%s plan=%s starts_on_activation=%s", actor, lic_key, clean_label, plan_key, expires_at is None)
 
     return {
         "ok": True,
         "license_key": lic_key,
+        "label": clean_label,
         "status": "active",
         "plan": plan_key,
         "trial_days": trial_days if plan_key == "trial" else None,
         "expires_at": _iso_utc(expires_at),
         "starts_on_activation": expires_at is None,
         "allow_repeat_trial": bool(req.allow_repeat_trial),
+    }
+
+
+@app.post("/api/v1/admin/label")
+def update_license_label(
+    license_key: str = Query(...),
+    label: str = Query(default=""),
+    auth: dict = Depends(_require_admin_api),
+):
+    """Set or update a human-friendly identification label on a license (e.g. 'Vivek's Dev PC')."""
+    key = license_key.strip()
+    clean_label = (label or "").strip()
+    if len(clean_label) > 120:
+        raise HTTPException(status_code=400, detail="Label must be 120 characters or fewer.")
+    new_val = clean_label or None
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT license_key, label, plan, expires_at, has_paid_renewal FROM licenses WHERE license_key = %s FOR UPDATE",
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Key not found")
+            prev_label = row.get("label")
+            cur.execute("UPDATE licenses SET label = %s WHERE license_key = %s", (new_val, key))
+            plan = (row.get("plan") or "trial").strip().lower()
+            exp = _as_utc(row.get("expires_at"))
+            has_paid = bool(row.get("has_paid_renewal", False))
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="label_updated",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=f"Label updated: '{prev_label or '—'}' -> '{new_val or '—'}'",
+            )
+    logger.info("[LICENSE LABEL] actor=%s key=%s label=%r", actor, key, new_val)
+    return {
+        "ok": True,
+        "license_key": key,
+        "label": new_val,
+        "previous_label": prev_label,
+    }
+
+
+@app.post("/api/v1/admin/delete")
+def delete_license(
+    license_key: str = Query(...),
+    clear_device_trial: bool = Query(
+        default=False,
+        description="Explicit opt-in: also delete device_trials row for the bound device_id so it may re-provision a fresh trial.",
+    ),
+    auth: dict = Depends(_require_admin_api),
+):
+    """
+    Hard-delete a license row for testing/reissue.
+    By default preserves `device_trials` so a device cannot silently bypass one-trial-per-device;
+    clearing the trial record requires an explicit separate confirmation step (either via
+    `POST /api/v1/admin/device-trials/override` or `clear_device_trial=true`).
+    """
+    key = license_key.strip()
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
+    is_owner = (auth.get("role") or "").strip().lower() == "owner" or auth.get("auth_type") == "admin_token"
+    if clear_device_trial and not is_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="SystemOwner (owner) privileges are required to clear device_trials history.",
+        )
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, device_id, label, status, plan, expires_at, has_paid_renewal
+                FROM licenses
+                WHERE license_key = %s
+                FOR UPDATE
+                """,
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Key not found")
+
+            prev_device = (row.get("device_id") or "").strip() or None
+            prev_label = row.get("label")
+            plan = (row.get("plan") or "trial").strip().lower()
+            exp = _as_utc(row.get("expires_at"))
+            has_paid = bool(row.get("has_paid_renewal", False))
+
+            had_trial = False
+            trial_cleared = False
+            if prev_device:
+                cur.execute(
+                    "SELECT device_id FROM device_trials WHERE device_id = %s",
+                    (prev_device,),
+                )
+                had_trial = cur.fetchone() is not None
+
+            cur.execute("DELETE FROM licenses WHERE license_key = %s", (key,))
+
+            if clear_device_trial and prev_device and had_trial:
+                cur.execute("DELETE FROM device_trials WHERE device_id = %s", (prev_device,))
+                trial_cleared = True
+                _record_license_audit(
+                    cur,
+                    license_key=key,
+                    action="trial_override",
+                    actor=actor,
+                    note=f"Explicitly cleared device_trials for device {prev_device} during license deletion",
+                )
+
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="license_deleted",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=None,
+                previous_expires_at=exp,
+                new_expires_at=None,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=None,
+                note=(
+                    f"Hard-deleted license '{key}'"
+                    + (f" (label='{prev_label}')" if prev_label else "")
+                    + f", device={prev_device or 'unbound'}, device_trial_cleared={trial_cleared}"
+                ),
+            )
+    logger.info(
+        "[LICENSE DELETED] actor=%s key=%s label=%r device=%s had_trial=%s trial_cleared=%s",
+        actor,
+        key,
+        prev_label,
+        prev_device,
+        had_trial,
+        trial_cleared,
+    )
+    return {
+        "ok": True,
+        "action": "license_deleted",
+        "license_key": key,
+        "label": prev_label,
+        "previous_device_id": prev_device,
+        "had_device_trial": had_trial,
+        "device_trial_cleared": trial_cleared,
     }
 
 
@@ -3190,7 +3456,7 @@ def list_licenses(_auth: dict = Depends(_require_admin_api)):
             cur.execute(
                 """
                 SELECT license_key, status, plan, expires_at, has_paid_renewal,
-                       device_id, app_version, last_seen, note,
+                       device_id, app_version, last_seen, note, label,
                        activated_at, trial_days, allow_repeat_trial
                 FROM licenses
                 ORDER BY license_key ASC
@@ -3394,7 +3660,7 @@ def admin_dashboard_summary(
             cur.execute(
                 """
                 SELECT license_key, status, plan, expires_at, has_paid_renewal,
-                       device_id, app_version, last_seen, note
+                       device_id, app_version, last_seen, note, label
                 FROM licenses
                 ORDER BY license_key ASC
                 """
@@ -3486,6 +3752,7 @@ def admin_dashboard_summary(
             "app_version": row.get("app_version"),
             "last_seen": _iso_utc(row.get("last_seen")),
             "note": row.get("note"),
+            "label": row.get("label"),
         }
         enriched_all.append(item)
         if eff == "active":
@@ -3914,7 +4181,7 @@ def list_credential_provisions(
             if dev_filter:
                 cur.execute(
                     """
-                    SELECT id, device_id, username, email, role, created_at, consumed_at, created_by
+                    SELECT id, device_id, username, email, role, must_change_password, created_at, consumed_at, created_by
                     FROM remote_credential_provisions
                     WHERE device_id = %s
                     ORDER BY created_at DESC, id DESC
@@ -3925,7 +4192,7 @@ def list_credential_provisions(
             else:
                 cur.execute(
                     """
-                    SELECT id, device_id, username, email, role, created_at, consumed_at, created_by
+                    SELECT id, device_id, username, email, role, must_change_password, created_at, consumed_at, created_by
                     FROM remote_credential_provisions
                     ORDER BY created_at DESC, id DESC
                     LIMIT %s
@@ -3940,6 +4207,7 @@ def list_credential_provisions(
             "username": str(r["username"]),
             "email": str(r["email"]),
             "role": str(r.get("role") or "ADMIN").strip().upper(),
+            "must_change_password": bool(r.get("must_change_password", True)),
             "created_at": _iso_utc(r.get("created_at")),
             "consumed_at": _iso_utc(r.get("consumed_at")),
             "created_by": str(r.get("created_by") or "owner"),
@@ -3957,13 +4225,20 @@ def create_credential_provision(
     """
     SystemOwner-only emergency recovery action: queue a one-shot login credential creation/overwrite
     for a specific `device_id`. Password is immediately bcrypt-hashed server-side (matching the client
-    app's bcrypt format) and plaintext is never stored or logged.
+    app's bcrypt format), never stored in plaintext or logged, and returned ONCE in this POST response
+    so SystemOwner can copy/communicate it. Marks `must_change_password = True` by default so the user
+    must rotate the temporary password on next login.
     """
     dev_id = (req.device_id or "").strip()
     username = (req.username or "").strip().lower()
     email = (req.email or "").strip().lower()
-    raw_password = req.password or ""
+    raw_password = (req.password or "").strip()
+    auto_generated = False
+    if not raw_password:
+        raw_password = _generate_one_time_password()
+        auto_generated = True
     role = (req.role or "ADMIN").strip().upper()
+    must_change = bool(req.must_change_password)
 
     if len(dev_id) < 4:
         raise HTTPException(status_code=400, detail="A valid bound device_id is required.")
@@ -4003,16 +4278,33 @@ def create_credential_provision(
             cur.execute(
                 """
                 INSERT INTO remote_credential_provisions (
-                    device_id, username, email, password_hash, role, created_at, consumed_at, created_by
+                    device_id, username, email, password_hash, role, must_change_password, created_at, consumed_at, created_by
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, NULL, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s)
                 RETURNING id, created_at
                 """,
-                (dev_id, username, email, pw_hash, role, now, actor),
+                (dev_id, username, email, pw_hash, role, must_change, now, actor),
             )
             inserted = cur.fetchone()
             prov_id = int(inserted["id"])
             created_at = _as_utc(inserted.get("created_at")) or now
+
+            # Keep non-sensitive portal directory up to date (NEVER stores password/hash)
+            cur.execute(
+                """
+                INSERT INTO device_rbac_accounts (
+                    device_id, username, email, role, is_active, must_change_password, last_synced_at
+                )
+                VALUES (%s, %s, %s, %s, TRUE, %s, %s)
+                ON CONFLICT (device_id, username) DO UPDATE
+                SET email = EXCLUDED.email,
+                    role = EXCLUDED.role,
+                    is_active = TRUE,
+                    must_change_password = EXCLUDED.must_change_password,
+                    last_synced_at = EXCLUDED.last_synced_at
+                """,
+                (dev_id, username, email, role, must_change, now),
+            )
 
             _record_license_audit(
                 cur,
@@ -4023,17 +4315,20 @@ def create_credential_provision(
                 new_plan=role,
                 note=(
                     f"Remotely provisioned by SystemOwner ({actor}): queued one-shot login credentials "
-                    f"for device {dev_id} (username='{username}', email='{email}', role={role}, provision_id={prov_id})"
+                    f"for device {dev_id} (username='{username}', email='{email}', role={role}, "
+                    f"must_change_password={must_change}, provision_id={prov_id})"
                 ),
             )
 
     logger.info(
-        "[REMOTE_CREDS PROVISIONED] id=%s actor=%s device=%s username=%s role=%s",
+        "[REMOTE_CREDS PROVISIONED] id=%s actor=%s device=%s username=%s role=%s must_change=%s auto_pw=%s",
         prov_id,
         actor,
         dev_id[:12],
         username,
         role,
+        must_change,
+        auto_generated,
     )
     return {
         "ok": True,
@@ -4042,11 +4337,118 @@ def create_credential_provision(
         "username": username,
         "email": email,
         "role": role,
+        "must_change_password": must_change,
+        "one_time_password": raw_password,
+        "auto_generated_password": auto_generated,
         "created_at": created_at.isoformat(),
         "consumed_at": None,
         "created_by": actor,
         "status": "pending",
     }
+
+
+@app.get("/api/v1/admin/device-rbac-accounts")
+def list_device_rbac_accounts(_auth: dict = Depends(_require_owner_or_token)):
+    """
+    SystemOwner-only portal directory: returns known device_ids grouped with their
+    license metadata (label, license_key, status, plan), local RBAC usernames/emails/roles
+    (STRICTLY NO passwords or password hashes), and recent one-shot provisions.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, label, status, plan, device_id, last_seen, note
+                FROM licenses
+                WHERE device_id IS NOT NULL
+                ORDER BY license_key ASC
+                """
+            )
+            lic_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT device_id, username, email, role, is_active, must_change_password, last_synced_at
+                FROM device_rbac_accounts
+                ORDER BY device_id ASC, username ASC
+                """
+            )
+            acct_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, device_id, username, email, role, must_change_password, created_at, consumed_at, created_by
+                FROM remote_credential_provisions
+                ORDER BY created_at DESC, id DESC
+                LIMIT 200
+                """
+            )
+            prov_rows = cur.fetchall()
+
+    devices: dict[str, dict] = {}
+
+    def _ensure_dev(dev_id: str) -> dict:
+        if dev_id not in devices:
+            devices[dev_id] = {
+                "device_id": dev_id,
+                "license_key": None,
+                "label": None,
+                "status": None,
+                "plan": None,
+                "last_seen": None,
+                "note": None,
+                "accounts": [],
+                "provisions": [],
+            }
+        return devices[dev_id]
+
+    for r in lic_rows:
+        dev = (r.get("device_id") or "").strip()
+        if not dev:
+            continue
+        entry = _ensure_dev(dev)
+        entry["license_key"] = r.get("license_key")
+        entry["label"] = r.get("label")
+        entry["status"] = r.get("status")
+        entry["plan"] = r.get("plan")
+        entry["last_seen"] = _iso_utc(r.get("last_seen"))
+        entry["note"] = r.get("note")
+
+    for a in acct_rows:
+        dev = (a.get("device_id") or "").strip()
+        if not dev:
+            continue
+        entry = _ensure_dev(dev)
+        entry["accounts"].append({
+            "username": str(a["username"]),
+            "email": str(a.get("email") or ""),
+            "role": str(a.get("role") or "OPERATOR").strip().upper(),
+            "is_active": bool(a.get("is_active", True)),
+            "must_change_password": bool(a.get("must_change_password", False)),
+            "last_synced_at": _iso_utc(a.get("last_synced_at")),
+        })
+
+    for p in prov_rows:
+        dev = (p.get("device_id") or "").strip()
+        if not dev:
+            continue
+        entry = _ensure_dev(dev)
+        entry["provisions"].append({
+            "id": int(p["id"]),
+            "username": str(p["username"]),
+            "email": str(p.get("email") or ""),
+            "role": str(p.get("role") or "ADMIN").strip().upper(),
+            "must_change_password": bool(p.get("must_change_password", True)),
+            "created_at": _iso_utc(p.get("created_at")),
+            "consumed_at": _iso_utc(p.get("consumed_at")),
+            "created_by": str(p.get("created_by") or "owner"),
+            "status": "consumed" if p.get("consumed_at") is not None else "pending",
+        })
+
+    return sorted(
+        devices.values(),
+        key=lambda d: ((d.get("label") or "").lower() == "", (d.get("label") or d.get("license_key") or d["device_id"]).lower()),
+    )
 
 
 @app.get("/", include_in_schema=False)

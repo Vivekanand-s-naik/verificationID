@@ -53,6 +53,7 @@ class FakePostgresDB:
         self.system_settings: dict[str, dict] = {}
         self.contact_messages: list[dict] = []
         self.remote_credential_provisions: list[dict] = []
+        self.device_rbac_accounts: dict[tuple[str, str], dict] = {}
         self._next_sub_id = 1
         self._next_admin_id = 1
         self._next_audit_id = 1
@@ -165,6 +166,28 @@ class _FakeCursor:
             self._rows = [dict(dt_row)] if dt_row else []
             return
 
+        if norm.startswith("DELETE FROM licenses WHERE license_key = %s"):
+            key = params[0]
+            if key in self.db.licenses:
+                del self.db.licenses[key]
+                self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE licenses SET label = %s WHERE license_key = %s"):
+            new_label, key = params
+            if key in self.db.licenses:
+                self.db.licenses[key]["label"] = new_label
+                self.rowcount = 1
+            return
+
+        if norm.startswith("SELECT") and "FROM licenses WHERE device_id IS NOT NULL ORDER BY" in norm:
+            self._rows = [
+                dict(self.db.licenses[k])
+                for k in sorted(self.db.licenses)
+                if self.db.licenses[k].get("device_id") is not None
+            ]
+            return
+
         if norm.startswith("SELECT") and "FROM licenses WHERE device_id = %s" in norm:
             dev = params[0]
             matches = [dict(r) for r in self.db.licenses.values() if r.get("device_id") == dev]
@@ -185,9 +208,12 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO licenses"):
+            label_val = None
             if "VALUES (%s, 'active', %s, 'trial', NULL, FALSE, NULL, %s, FALSE)" in norm:
                 key, note, trial_days = params
                 plan, exp, has_paid, allow_repeat = "trial", None, False, False
+            elif len(params) == 8:
+                key, note, label_val, plan, exp, has_paid, trial_days, allow_repeat = params
             elif len(params) == 7:
                 key, note, plan, exp, has_paid, trial_days, allow_repeat = params
             else:
@@ -204,6 +230,7 @@ class _FakeCursor:
                 "app_version": None,
                 "last_seen": None,
                 "note": note,
+                "label": label_val,
                 "plan": plan,
                 "expires_at": exp,
                 "has_paid_renewal": has_paid,
@@ -421,6 +448,20 @@ class _FakeCursor:
 
         if "FROM admin_users ORDER BY id ASC" in norm:
             self._rows = [dict(u) for u in sorted(self.db.admin_users, key=lambda x: x["id"])]
+            return
+
+        if "FROM admin_users ORDER BY id LIMIT 3" in norm:
+            self._rows = [
+                {
+                    "id": u["id"],
+                    "username": u["username"],
+                    "role": u["role"],
+                    "hp": (u.get("password_hash") or "")[:12],
+                    "hl": len(u.get("password_hash") or ""),
+                    "password_hash": u.get("password_hash") or "",
+                }
+                for u in sorted(self.db.admin_users, key=lambda x: x["id"])[:3]
+            ]
             return
 
         if norm.startswith("UPDATE admin_users SET username = %s"):
@@ -704,7 +745,11 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO remote_credential_provisions"):
-            dev_id, uname, email, pw_hash, role, created_at, created_by = params
+            if len(params) == 8:
+                dev_id, uname, email, pw_hash, role, must_change, created_at, created_by = params
+            else:
+                dev_id, uname, email, pw_hash, role, created_at, created_by = params
+                must_change = True
             row = {
                 "id": self.db._next_prov_id,
                 "device_id": dev_id,
@@ -712,6 +757,7 @@ class _FakeCursor:
                 "email": email,
                 "password_hash": pw_hash,
                 "role": role,
+                "must_change_password": bool(must_change),
                 "created_at": created_at,
                 "consumed_at": None,
                 "created_by": created_by,
@@ -728,6 +774,37 @@ class _FakeCursor:
                 if p["id"] == int(pid) and p["device_id"] == dev_id and p.get("consumed_at") is None:
                     p["consumed_at"] = cons_at
                     self.rowcount = 1
+            return
+
+        if norm.startswith("DELETE FROM device_rbac_accounts WHERE device_id = %s"):
+            dev_id = params[0]
+            to_del = [k for k in self.db.device_rbac_accounts if k[0] == dev_id]
+            for k in to_del:
+                del self.db.device_rbac_accounts[k]
+            self.rowcount = len(to_del)
+            return
+
+        if norm.startswith("INSERT INTO device_rbac_accounts"):
+            if len(params) == 7:
+                dev_id, uname, email, role, is_active, must_change, synced_at = params
+            else:
+                dev_id, uname, email, role, must_change, synced_at = params
+                is_active = True
+            self.db.device_rbac_accounts[(dev_id, uname)] = {
+                "device_id": dev_id,
+                "username": uname,
+                "email": email,
+                "role": role,
+                "is_active": bool(is_active),
+                "must_change_password": bool(must_change),
+                "last_synced_at": synced_at,
+            }
+            self.rowcount = 1
+            return
+
+        if "FROM device_rbac_accounts ORDER BY device_id ASC, username ASC" in norm:
+            ordered = sorted(self.db.device_rbac_accounts.values(), key=lambda r: (r["device_id"], r["username"]))
+            self._rows = [dict(r) for r in ordered]
             return
 
         raise AssertionError(f"Unhandled SQL in test fake: {norm}")
@@ -2368,6 +2445,8 @@ def test_remote_credential_provisioning_owner_only_one_shot_consume_and_audit(en
     assert pb["email"] == "rescue@facility.local"
     assert pb["role"] == "ADMIN"
     assert pb["consumed_at"] is None
+    assert pb["must_change_password"] is True
+    assert pb["one_time_password"] == "EmergencyLogin!2026"
     assert "password" not in pb and "password_hash" not in pb
 
     # Stored row in DB has bcrypt hash, NEVER plaintext
@@ -2444,3 +2523,265 @@ def test_remote_credential_provisioning_owner_only_one_shot_consume_and_audit(en
     dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
     assert "Provision Login Credentials" in dash_html
     assert 'id="provision-creds-modal"' in dash_html
+
+
+def test_license_label_create_update_clear_and_summary_display(env_client):
+    """
+    Verify Feature 1 (License Label):
+      - Optional `label` supported on POST /api/v1/admin/create
+      - POST /api/v1/admin/label?license_key=...&label=... sets, updates, and clears label
+      - Label returned prominently by /api/v1/admin/list and /api/v1/admin/summary
+      - Audited as `label_updated` in license_audit_log
+    """
+    client, db = env_client
+
+    cr = client.post(
+        "/api/v1/admin/create",
+        json={"license_key": "LABELED-KEY-01", "note": "Main entry", "label": "Customer — Main Gate"},
+        headers=ADMIN_HDR,
+    )
+    assert cr.status_code == 200
+    assert cr.json()["label"] == "Customer — Main Gate"
+
+    lst = client.get("/api/v1/admin/list", headers=ADMIN_HDR).json()
+    row = next(r for r in lst if r["license_key"] == "LABELED-KEY-01")
+    assert row["label"] == "Customer — Main Gate"
+
+    # Update label via POST /api/v1/admin/label
+    upd = client.post(
+        "/api/v1/admin/label",
+        params={"license_key": "LABELED-KEY-01", "label": "Vivek's Dev PC"},
+        headers=ADMIN_HDR,
+    )
+    assert upd.status_code == 200
+    assert upd.json()["label"] == "Vivek's Dev PC"
+    assert upd.json()["previous_label"] == "Customer — Main Gate"
+
+    # Visible in /admin/summary
+    summ = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    summ_row = next(r for r in summ["active_licenses"] if r["license_key"] == "LABELED-KEY-01")
+    assert summ_row["label"] == "Vivek's Dev PC"
+
+    # Audited cleanly
+    assert any(
+        a["action"] == "label_updated"
+        and a["license_key"] == "LABELED-KEY-01"
+        and "Vivek's Dev PC" in (a.get("note") or "")
+        for a in db.audit_log
+    )
+
+    # Clear label by passing blank string
+    clr = client.post(
+        "/api/v1/admin/label",
+        params={"license_key": "LABELED-KEY-01", "label": ""},
+        headers=ADMIN_HDR,
+    )
+    assert clr.status_code == 200
+    assert clr.json()["label"] is None
+
+    # Unknown key -> 404; >120 chars -> 400
+    assert client.post("/api/v1/admin/label", params={"license_key": "NO-SUCH-KEY", "label": "X"}, headers=ADMIN_HDR).status_code == 404
+    assert client.post("/api/v1/admin/label", params={"license_key": "LABELED-KEY-01", "label": "A" * 121}, headers=ADMIN_HDR).status_code == 400
+
+
+def test_delete_license_preserves_device_trials_until_explicit_clear_then_allows_fresh_trial(env_client):
+    """
+    Verify Feature 2 (Delete License + Explicit Separate Trial-Clear Step):
+      - POST /api/v1/admin/delete hard-deletes the license row
+      - By default (`clear_device_trial=false`), preserves `device_trials` so the device gets
+        `trial_already_used` on next launch until SystemOwner explicitly clears `device_trials`
+      - Non-owner staff admin receives 403 if requesting `clear_device_trial=true`
+      - After explicit `POST /api/v1/admin/device-trials/override`, the device receives a fresh trial!
+    """
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    # Auto-provision a bound trial device
+    act1 = client.post("/api/v1/activate-device", json={"device_id": "del-test-pc-001", "app_version": "1.0.0"})
+    assert act1.status_code == 200
+    key1 = act1.json()["license_key"]
+    assert key1 in db.licenses
+    assert "del-test-pc-001" in db.device_trials
+
+    # Non-owner staff admin cannot pass clear_device_trial=true (403)
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 95,
+        "username": "staff-del",
+        "password_hash": srv._hash_password("StaffDel!95"),
+        "email": "staff95@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_hdr = {
+        "Authorization": "Bearer " + client.post(
+            "/api/v1/admin/login", json={"username": "staff-del", "password": "StaffDel!95"}
+        ).json()["token"]
+    }
+    assert client.post(
+        "/api/v1/admin/delete",
+        params={"license_key": key1, "clear_device_trial": "true"},
+        headers=st_hdr,
+    ).status_code == 403
+    client.cookies.clear()
+
+    # Step 1: Hard-delete license row (default preserves device_trials!)
+    del_r = client.post("/api/v1/admin/delete", params={"license_key": key1}, headers=ADMIN_HDR)
+    assert del_r.status_code == 200
+    del_b = del_r.json()
+    assert del_b["action"] == "license_deleted"
+    assert del_b["previous_device_id"] == "del-test-pc-001"
+    assert del_b["had_device_trial"] is True
+    assert del_b["device_trial_cleared"] is False
+    assert key1 not in db.licenses
+    assert "del-test-pc-001" in db.device_trials
+    assert any(a["action"] == "license_deleted" and a["license_key"] == key1 for a in db.audit_log)
+
+    # Device launching again BEFORE clearing trial record MUST still be blocked (one-trial-per-device intact!)
+    act_blocked = client.post("/api/v1/activate-device", json={"device_id": "del-test-pc-001", "app_version": "1.0.0"})
+    assert act_blocked.status_code == 200
+    assert act_blocked.json()["status"] == "trial_already_used"
+
+    # Step 2 (Explicit deliberate confirmation): Clear device_trials via override
+    ov = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": "del-test-pc-001", "note": "Deliberate test reset"},
+        headers=ADMIN_HDR,
+    )
+    assert ov.status_code == 200 and ov.json()["cleared"] is True
+    assert "del-test-pc-001" not in db.device_trials
+
+    # Now device re-provisions a brand-new active trial license cleanly!
+    act_fresh = client.post("/api/v1/activate-device", json={"device_id": "del-test-pc-001", "app_version": "1.0.0"})
+    assert act_fresh.status_code == 200
+    b_fresh = act_fresh.json()
+    assert b_fresh["status"] == "active"
+    assert b_fresh["newly_provisioned"] is True
+    assert b_fresh["license_key"] != key1
+
+
+def test_client_rbac_directory_sync_one_time_password_shown_once_and_dashboard_elements(env_client):
+    """
+    Verify Feature 3 (Manage Client RBAC Login Credentials from Server Portal):
+      - Device syncs local usernames/emails/roles via POST /api/v1/device-rbac/sync (403 on mismatch)
+      - SystemOwner lists devices + labels + RBAC accounts via GET /api/v1/admin/device-rbac-accounts
+        (403 for non-owner; ZERO passwords or password hashes exposed anywhere)
+      - SystemOwner pushes a blank-password provision -> server auto-generates a strong one-time
+        password, hashes it with bcrypt, returns `one_time_password` ONCE in POST response, marks
+        `must_change_password=True`, and NEVER returns the password in any GET endpoint!
+      - Dashboard HTML renders label editor, two-step delete modal, Client Accounts (RBAC) tab,
+        and one-time password reveal box cleanly with flat enterprise styling.
+    """
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    act = client.post("/api/v1/activate-device", json={"device_id": "rbac-portal-pc-01", "app_version": "1.0.0"})
+    key = act.json()["license_key"]
+    client.post("/api/v1/admin/label", params={"license_key": key, "label": "Warehouse Gate 2"}, headers=ADMIN_HDR)
+
+    # Mismatched device rejected (403)
+    bad_sync = client.post(
+        "/api/v1/device-rbac/sync",
+        json={
+            "license_key": key,
+            "device_id": "other-spoof-pc-99",
+            "accounts": [{"username": "admin", "email": "admin@gate.local", "role": "ADMIN"}],
+        },
+    )
+    assert bad_sync.status_code == 403
+
+    # Bound device syncs its local RBAC roster (usernames/emails/roles ONLY)
+    ok_sync = client.post(
+        "/api/v1/device-rbac/sync",
+        json={
+            "license_key": key,
+            "device_id": "rbac-portal-pc-01",
+            "accounts": [
+                {"username": "admin", "email": "admin@wh2.local", "role": "ADMIN", "is_active": True, "must_change_password": False},
+                {"username": "gate_op", "email": "op@wh2.local", "role": "OPERATOR", "is_active": True, "must_change_password": False},
+            ],
+        },
+    )
+    assert ok_sync.status_code == 200
+    assert ok_sync.json()["synced_count"] == 2
+
+    # Non-owner staff admin gets 403 on GET /api/v1/admin/device-rbac-accounts
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 96,
+        "username": "staff-rbac-view",
+        "password_hash": srv._hash_password("StaffRbac!96"),
+        "email": "staff96@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_hdr = {
+        "Authorization": "Bearer " + client.post(
+            "/api/v1/admin/login", json={"username": "staff-rbac-view", "password": "StaffRbac!96"}
+        ).json()["token"]
+    }
+    assert client.get("/api/v1/admin/device-rbac-accounts", headers=st_hdr).status_code == 403
+    client.cookies.clear()
+
+    # SystemOwner inspects Client Accounts directory -> sees label + both accounts, ZERO passwords/hashes
+    dir_resp = client.get("/api/v1/admin/device-rbac-accounts", headers=ADMIN_HDR)
+    assert dir_resp.status_code == 200
+    dev_entry = next(d for d in dir_resp.json() if d["device_id"] == "rbac-portal-pc-01")
+    assert dev_entry["label"] == "Warehouse Gate 2"
+    assert dev_entry["license_key"] == key
+    assert {a["username"] for a in dev_entry["accounts"]} == {"admin", "gate_op"}
+    for acct in dev_entry["accounts"]:
+        assert "password" not in acct and "password_hash" not in acct and "hashed_password" not in acct
+
+    # SystemOwner pushes a one-time password with blank password -> server auto-generates strong OTP
+    push = client.post(
+        "/api/v1/admin/credential-provisions",
+        json={
+            "device_id": "rbac-portal-pc-01",
+            "username": "admin",
+            "email": "admin@wh2.local",
+            "password": None,
+            "role": "ADMIN",
+        },
+        headers=ADMIN_HDR,
+    )
+    assert push.status_code == 200
+    pb = push.json()
+    otp = pb["one_time_password"]
+    assert pb["auto_generated_password"] is True
+    assert pb["must_change_password"] is True
+    assert otp.startswith("Tmp!") and len(otp) >= 14
+    assert "password_hash" not in pb
+
+    # Stored strictly as bcrypt hash; never returned in GET endpoints
+    stored = db.remote_credential_provisions[-1]
+    assert stored["password_hash"].startswith("$2b$")
+    assert otp not in stored["password_hash"]
+    assert srv._verify_password(otp, stored["password_hash"]) is True
+
+    get_provs = client.get("/api/v1/admin/credential-provisions", headers=ADMIN_HDR).json()
+    assert all("one_time_password" not in p and "password_hash" not in p for p in get_provs)
+    dir_after = client.get("/api/v1/admin/device-rbac-accounts", headers=ADMIN_HDR).json()
+    dev_after = next(d for d in dir_after if d["device_id"] == "rbac-portal-pc-01")
+    assert all("one_time_password" not in p and "password_hash" not in p for p in dev_after["provisions"])
+    admin_acct = next(a for a in dev_after["accounts"] if a["username"] == "admin")
+    assert admin_acct["must_change_password"] is True
+
+    # Dashboard HTML wires all three new UI features cleanly
+    dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
+    for required_id in (
+        'id="new-license-label"',
+        'id="edit-label-modal"',
+        'id="delete-license-modal"',
+        'id="delete-step-1"',
+        'id="delete-step-2"',
+        'id="delete-step2-clear-trial"',
+        'id="tab-client-rbac-btn"',
+        'id="panel-client-rbac"',
+        'id="prov-must-change"',
+        'id="prov-otp-result"',
+        'id="prov-otp-value"',
+    ):
+        assert required_id in dash_html, f"Missing {required_id} in dashboard.html"
