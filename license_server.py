@@ -37,6 +37,12 @@ SCREENSHOT_RATE_LIMIT_MINUTES = 10
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024  # 5 MB
 CONTACT_MESSAGE_RATE_LIMIT_MINUTES = 2
 MAX_CONTACT_MESSAGE_CHARS = 1500
+MAX_DIRECT_MESSAGE_CHARS = 2000
+MAX_IDEMPOTENCY_KEY_CHARS = 128
+CLIENT_MESSAGE_RATE_LIMIT_MAX = 20
+CLIENT_MESSAGE_RATE_LIMIT_WINDOW_SECONDS = 60
+_CLIENT_MESSAGE_ATTEMPTS: dict[str, list[float]] = {}
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 ADMIN_UI_DIR = Path(__file__).resolve().parent / "admin_ui"
 SESSION_COOKIE_NAME = "admin_session"
@@ -368,6 +374,44 @@ def init_db():
                     last_synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (device_id, username)
                 )
+            """)
+
+            # Persistent two-way license-linked messaging (individual conversations, separate from broadcasts)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS license_messages (
+                    id SERIAL PRIMARY KEY,
+                    license_key TEXT NOT NULL REFERENCES licenses(license_key) ON DELETE CASCADE,
+                    sender_type TEXT NOT NULL CHECK (sender_type IN ('client', 'admin')),
+                    sender_identity TEXT NOT NULL,
+                    target_device_id TEXT,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'received',
+                    idempotency_key TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    delivered_at TIMESTAMPTZ,
+                    read_at TIMESTAMPTZ,
+                    read_by TEXT,
+                    retargeted_from_device_id TEXT,
+                    retargeted_by TEXT,
+                    retargeted_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_license_messages_key_created
+                ON license_messages (license_key, created_at ASC, id ASC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_license_messages_status
+                ON license_messages (license_key, sender_type, status)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_license_messages_target_dev
+                ON license_messages (license_key, target_device_id, status)
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_license_messages_idempotency
+                ON license_messages (license_key, sender_type, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
             """)
 
             _seed_default_plans(cur)
@@ -938,6 +982,200 @@ def _check_and_record_activate_device_rate_limit(ip: str) -> None:
         )
     recent.append(now_ts)
     _ACTIVATE_DEVICE_ATTEMPTS[ip] = recent
+
+
+def _check_and_record_client_message_rate_limit(bucket_key: str) -> None:
+    """Rate-limit client message submissions per authenticated (license_key, device_id)."""
+    now_ts = time.monotonic()
+    cutoff = now_ts - CLIENT_MESSAGE_RATE_LIMIT_WINDOW_SECONDS
+    recent = [ts for ts in _CLIENT_MESSAGE_ATTEMPTS.get(bucket_key, []) if ts > cutoff]
+    if len(recent) >= CLIENT_MESSAGE_RATE_LIMIT_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many messages sent recently. Please wait a moment before sending another.",
+        )
+    recent.append(now_ts)
+    _CLIENT_MESSAGE_ATTEMPTS[bucket_key] = recent
+
+
+def _validate_message_body(raw_body: str | None) -> str:
+    if raw_body is None or "\x00" in raw_body:
+        raise HTTPException(status_code=400, detail="Invalid message content.")
+    cleaned = raw_body.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Message body cannot be empty.")
+    if len(cleaned) > MAX_DIRECT_MESSAGE_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message body exceeds maximum length of {MAX_DIRECT_MESSAGE_CHARS} characters.",
+        )
+    return cleaned
+
+
+def _validate_idempotency_key(raw_key: str | None) -> str | None:
+    if raw_key is None:
+        return None
+    cleaned = raw_key.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_IDEMPOTENCY_KEY_CHARS or not _IDEMPOTENCY_KEY_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail="Invalid idempotency_key format.")
+    return cleaned
+
+
+def _sanitize_operator_name(raw_name: str | None) -> str | None:
+    if not raw_name:
+        return None
+    cleaned = "".join(ch for ch in str(raw_name).strip() if ch.isprintable() and ch not in "\r\n\t")
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:64] or None
+
+
+def _serialize_license_message(row: dict) -> dict:
+    return {
+        "id": int(row["id"]),
+        "license_key": str(row["license_key"]),
+        "sender_type": str(row["sender_type"]),
+        "sender_identity": str(row.get("sender_identity") or ""),
+        "target_device_id": row.get("target_device_id"),
+        "body": str(row.get("body") or ""),
+        "status": str(row.get("status") or ""),
+        "idempotency_key": row.get("idempotency_key"),
+        "created_at": _iso_utc(row.get("created_at")),
+        "delivered_at": _iso_utc(row.get("delivered_at")),
+        "read_at": _iso_utc(row.get("read_at")),
+        "read_by": row.get("read_by"),
+        "retargeted_from_device_id": row.get("retargeted_from_device_id"),
+        "retargeted_by": row.get("retargeted_by"),
+        "retargeted_at": _iso_utc(row.get("retargeted_at")),
+    }
+
+
+def _resolve_client_auth_pair(
+    request: Request,
+    body_key: str | None = None,
+    body_device_id: str | None = None,
+    target_license_key: str | None = None,
+) -> tuple[str, str]:
+    """
+    Extract authenticated client (license_key, device_id) from headers and/or payload.
+    Rejects any conflicting identity headers vs payload or any cross-license targeting attempt.
+    """
+    hdr_key = (request.headers.get("x-license-key") or "").strip()
+    hdr_dev = (request.headers.get("x-device-id") or "").strip()
+    b_key = (body_key or "").strip()
+    b_dev = (body_device_id or "").strip()
+
+    if hdr_key and b_key and not hmac.compare_digest(hdr_key, b_key):
+        raise HTTPException(status_code=403, detail="Conflicting license identity in request.")
+    if hdr_dev and b_dev and not hmac.compare_digest(hdr_dev, b_dev):
+        raise HTTPException(status_code=403, detail="Conflicting device identity in request.")
+
+    eff_key = hdr_key or b_key
+    eff_dev = hdr_dev or b_dev
+
+    if target_license_key is not None:
+        tgt = target_license_key.strip()
+        if tgt and (not eff_key or not hmac.compare_digest(tgt, eff_key)):
+            raise HTTPException(status_code=403, detail="Access denied: cannot access another license's conversation.")
+
+    return eff_key, eff_dev
+
+
+def _authenticate_client_messaging(cur, license_key: str, device_id: str, client_ip: str) -> dict:
+    """
+    Reuse the server's authoritative license & single-device binding model to authenticate
+    client messaging requests. Enforces revoked, unbound, device-mismatch, and expired rules
+    without bypassing or weakening license validation.
+    """
+    if not license_key or len(device_id) < 4:
+        raise HTTPException(status_code=401, detail="Authenticated license_key and device_id are required.")
+
+    cur.execute(
+        """
+        SELECT license_key, status, plan, expires_at, has_paid_renewal,
+               device_id, label, note, app_version, last_seen
+        FROM licenses
+        WHERE license_key = %s
+        """,
+        (license_key,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        _record_and_check_unknown_key_rate_limit(client_ip)
+        raise HTTPException(status_code=401, detail="License key not recognized.")
+
+    status = (row.get("status") or "").strip().lower()
+    if status in {"revoked", "suspended", "disabled"}:
+        raise HTTPException(status_code=403, detail="Revoked or inactive licenses cannot access messaging.")
+
+    bound_dev = (row.get("device_id") or "").strip()
+    if not bound_dev:
+        raise HTTPException(status_code=403, detail="This license is not bound to an activated device.")
+    if not hmac.compare_digest(bound_dev, device_id):
+        raise HTTPException(status_code=403, detail="This license is bound to a different computer.")
+
+    expires_at = _as_utc(row.get("expires_at"))
+    if status == "expired" or (expires_at is not None and expires_at <= _utc_now()):
+        raise HTTPException(status_code=403, detail="This license has expired. Renew to restore messaging access.")
+
+    return row
+
+
+def _effective_license_status_str(row: dict, now: datetime | None = None) -> str:
+    raw = (row.get("status") or "").strip().lower()
+    if raw == "revoked":
+        return "revoked"
+    if raw == "expired":
+        return "expired"
+    exp = _as_utc(row.get("expires_at"))
+    ref_now = now or _utc_now()
+    if exp is not None and exp <= ref_now:
+        return "expired"
+    return raw or "active"
+
+
+def _fetch_client_scoped_messages(
+    cur,
+    *,
+    license_key: str,
+    device_id: str,
+    since_id: int | None = None,
+) -> list[dict]:
+    """
+    Fetch messages strictly scoped to this authenticated (license_key, device_id).
+    Excludes held/cancelled messages and any messages bound to a prior device_id.
+    """
+    if since_id is not None and int(since_id) > 0:
+        cur.execute(
+            """
+            SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                   body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                   retargeted_from_device_id, retargeted_by, retargeted_at
+            FROM license_messages
+            WHERE license_key = %s
+              AND target_device_id = %s
+              AND status NOT IN ('held_device_changed', 'cancelled')
+              AND id > %s
+            ORDER BY created_at ASC, id ASC
+            """,
+            (license_key, device_id, int(since_id)),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                   body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                   retargeted_from_device_id, retargeted_by, retargeted_at
+            FROM license_messages
+            WHERE license_key = %s
+              AND target_device_id = %s
+              AND status NOT IN ('held_device_changed', 'cancelled')
+            ORDER BY created_at ASC, id ASC
+            """,
+            (license_key, device_id),
+        )
+    return [_serialize_license_message(r) for r in cur.fetchall()]
 
 
 def _send_password_reset_smtp(
@@ -1538,6 +1776,39 @@ class SyncDeviceRbacRequest(BaseModel):
     license_key: str
     device_id: str
     accounts: list[DeviceRbacAccountItem] = []
+
+
+class ClientMessageSendRequest(BaseModel):
+    license_key: str | None = None
+    device_id: str | None = None
+    body: str
+    idempotency_key: str | None = None
+    operator_name: str | None = None
+    target_license_key: str | None = None
+
+
+class ClientMessageSyncRequest(BaseModel):
+    license_key: str | None = None
+    device_id: str | None = None
+    since_id: int | None = None
+    target_license_key: str | None = None
+
+
+class ClientMessageAckRequest(BaseModel):
+    license_key: str | None = None
+    device_id: str | None = None
+    message_ids: list[int]
+    target_license_key: str | None = None
+
+
+class AdminMessageSendRequest(BaseModel):
+    license_key: str
+    body: str
+    idempotency_key: str | None = None
+
+
+class AdminMessageRetargetRequest(BaseModel):
+    action: str = "retarget"  # "retarget" | "cancel"
 
 
 # ============================================================== PUBLIC ROUTES
@@ -3415,6 +3686,22 @@ def unbind_license_device(
                 raise HTTPException(status_code=404, detail="Key not found")
             prev_device = (row.get("device_id") or "").strip() or None
             cur.execute("UPDATE licenses SET device_id = NULL WHERE license_key = %s", (key,))
+            # Hold any pending queued outgoing admin messages so a replacement device cannot
+            # accidentally receive messages intended for the previous bound installation.
+            held_count = 0
+            if prev_device:
+                cur.execute(
+                    """
+                    UPDATE license_messages
+                    SET status = 'held_device_changed'
+                    WHERE license_key = %s
+                      AND sender_type = 'admin'
+                      AND status = 'queued'
+                      AND (target_device_id IS NULL OR target_device_id = %s)
+                    """,
+                    (key, prev_device),
+                )
+                held_count = int(cur.rowcount or 0)
             plan = (row.get("plan") or "trial").strip().lower()
             exp = _as_utc(row.get("expires_at"))
             has_paid = bool(row.get("has_paid_renewal", False))
@@ -3431,13 +3718,34 @@ def unbind_license_device(
                 new_has_paid_renewal=has_paid,
                 note=f"Unbound device {prev_device or 'none'} to allow transfer to another PC",
             )
-            logger.info("[LICENSE UNBIND_DEVICE] actor=%s key=%s previous_device=%s", actor, key, prev_device)
+            if held_count > 0:
+                _record_license_audit(
+                    cur,
+                    license_key=key,
+                    action="messages_held_on_unbind",
+                    actor=actor,
+                    previous_plan=plan,
+                    new_plan=plan,
+                    previous_expires_at=exp,
+                    new_expires_at=exp,
+                    previous_has_paid_renewal=has_paid,
+                    new_has_paid_renewal=has_paid,
+                    note=f"Held {held_count} queued admin message(s) after unbinding device {prev_device[:12]}",
+                )
+            logger.info(
+                "[LICENSE UNBIND_DEVICE] actor=%s key=%s previous_device=%s held_messages=%d",
+                actor,
+                key,
+                prev_device,
+                held_count,
+            )
     return {
         "ok": True,
         "action": "unbind_device",
         "license_key": key,
         "previous_device_id": prev_device,
         "device_id": None,
+        "held_message_count": held_count,
     }
 
 
@@ -4582,6 +4890,864 @@ def list_device_rbac_accounts(_auth: dict = Depends(_require_owner_or_token)):
         devices.values(),
         key=lambda d: ((d.get("label") or "").lower() == "", (d.get("label") or d.get("license_key") or d["device_id"]).lower()),
     )
+
+
+# ============================================ TWO-WAY LICENSE-LINKED MESSAGING
+@app.post("/api/v1/messages/send")
+def client_send_message(req: ClientMessageSendRequest, request: Request):
+    """
+    Authenticated client-to-admin messaging endpoint.
+    Server derives and verifies the sending license identity exclusively from the
+    authenticated (license_key, device_id) bound in `licenses`. Supports idempotency keys
+    and per-client rate limiting. Never logs private message body contents.
+    """
+    eff_key, eff_dev = _resolve_client_auth_pair(
+        request,
+        body_key=req.license_key,
+        body_device_id=req.device_id,
+        target_license_key=req.target_license_key,
+    )
+    body_text = _validate_message_body(req.body)
+    idem_key = _validate_idempotency_key(req.idempotency_key)
+    operator_name = _sanitize_operator_name(req.operator_name)
+    client_ip = _client_ip(request)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            lic = _authenticate_client_messaging(cur, eff_key, eff_dev, client_ip)
+            auth_key = str(lic["license_key"])
+            auth_dev = str(lic["device_id"])
+
+            if idem_key:
+                cur.execute(
+                    """
+                    SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                           body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                           retargeted_from_device_id, retargeted_by, retargeted_at
+                    FROM license_messages
+                    WHERE license_key = %s
+                      AND sender_type = 'client'
+                      AND idempotency_key = %s
+                    """,
+                    (auth_key, idem_key),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    return {
+                        "ok": True,
+                        "deduplicated": True,
+                        "message": _serialize_license_message(existing),
+                    }
+
+            _check_and_record_client_message_rate_limit(f"{auth_key}:{auth_dev}")
+            sender_identity = (
+                f"{operator_name} (device:{auth_dev[:12]})"
+                if operator_name
+                else f"device:{auth_dev[:12]}"
+            )
+            cur.execute(
+                """
+                INSERT INTO license_messages (
+                    license_key, sender_type, sender_identity, target_device_id,
+                    body, status, idempotency_key, created_at
+                )
+                VALUES (%s, 'client', %s, %s, %s, 'received', %s, %s)
+                RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                          body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                          retargeted_from_device_id, retargeted_by, retargeted_at
+                """,
+                (auth_key, sender_identity, auth_dev, body_text, idem_key, now),
+            )
+            inserted = cur.fetchone()
+            msg = _serialize_license_message(inserted)
+
+    logger.info(
+        "[LICENSE MESSAGE] id=%s dir=client->admin key=%s device=%s status=received len=%d",
+        msg["id"],
+        auth_key,
+        auth_dev[:12],
+        len(body_text),
+    )
+    return {
+        "ok": True,
+        "deduplicated": False,
+        "message": msg,
+    }
+
+
+@app.post("/api/v1/messages/sync")
+def client_sync_messages(req: ClientMessageSyncRequest, request: Request):
+    """
+    Synchronize this authenticated client's own conversation history and pending queued
+    admin messages. Deliberately does NOT mark `queued` messages as `delivered` — client
+    must explicitly confirm receipt via `POST /api/v1/messages/ack-delivered`.
+    """
+    eff_key, eff_dev = _resolve_client_auth_pair(
+        request,
+        body_key=req.license_key,
+        body_device_id=req.device_id,
+        target_license_key=req.target_license_key,
+    )
+    client_ip = _client_ip(request)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            lic = _authenticate_client_messaging(cur, eff_key, eff_dev, client_ip)
+            auth_key = str(lic["license_key"])
+            auth_dev = str(lic["device_id"])
+            messages = _fetch_client_scoped_messages(
+                cur,
+                license_key=auth_key,
+                device_id=auth_dev,
+                since_id=req.since_id,
+            )
+
+    pending_delivery_ids = [
+        m["id"] for m in messages if m["sender_type"] == "admin" and m["status"] == "queued"
+    ]
+    unread_count = sum(
+        1 for m in messages if m["sender_type"] == "admin" and m["status"] in ("queued", "delivered")
+    )
+    return {
+        "ok": True,
+        "license_key": auth_key,
+        "license_label": lic.get("label") or None,
+        "device_id": auth_dev,
+        "messages": messages,
+        "pending_delivery_ids": pending_delivery_ids,
+        "unread_count": unread_count,
+        "server_time": now.isoformat(),
+    }
+
+
+@app.get("/api/v1/messages/conversation/{license_key}")
+def client_get_conversation(
+    license_key: str,
+    request: Request,
+    since_id: int | None = Query(default=None),
+):
+    """
+    Read-only client conversation endpoint enforcing strict license isolation:
+    authenticated via X-License-Key + X-Device-Id headers; any attempt to query a
+    different license_key is immediately rejected with 403 Forbidden.
+    """
+    eff_key, eff_dev = _resolve_client_auth_pair(
+        request,
+        target_license_key=license_key,
+    )
+    client_ip = _client_ip(request)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            lic = _authenticate_client_messaging(cur, eff_key, eff_dev, client_ip)
+            auth_key = str(lic["license_key"])
+            auth_dev = str(lic["device_id"])
+            messages = _fetch_client_scoped_messages(
+                cur,
+                license_key=auth_key,
+                device_id=auth_dev,
+                since_id=since_id,
+            )
+
+    pending_delivery_ids = [
+        m["id"] for m in messages if m["sender_type"] == "admin" and m["status"] == "queued"
+    ]
+    unread_count = sum(
+        1 for m in messages if m["sender_type"] == "admin" and m["status"] in ("queued", "delivered")
+    )
+    return {
+        "ok": True,
+        "license_key": auth_key,
+        "license_label": lic.get("label") or None,
+        "device_id": auth_dev,
+        "messages": messages,
+        "pending_delivery_ids": pending_delivery_ids,
+        "unread_count": unread_count,
+        "server_time": now.isoformat(),
+    }
+
+
+@app.post("/api/v1/messages/ack-delivered")
+def client_ack_delivered(req: ClientMessageAckRequest, request: Request):
+    """
+    Explicit client delivery acknowledgment. Transitions matching outgoing admin messages
+    strictly bound to this authenticated (license_key, device_id) from `queued` -> `delivered`
+    and records `delivered_at` + audit trail. Idempotent on retries.
+    """
+    eff_key, eff_dev = _resolve_client_auth_pair(
+        request,
+        body_key=req.license_key,
+        body_device_id=req.device_id,
+        target_license_key=req.target_license_key,
+    )
+    clean_ids = sorted({int(mid) for mid in (req.message_ids or []) if int(mid) > 0})[:200]
+    if not clean_ids:
+        raise HTTPException(status_code=400, detail="At least one valid message_id is required.")
+
+    client_ip = _client_ip(request)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            lic = _authenticate_client_messaging(cur, eff_key, eff_dev, client_ip)
+            auth_key = str(lic["license_key"])
+            auth_dev = str(lic["device_id"])
+
+            cur.execute(
+                """
+                UPDATE license_messages
+                SET status = 'delivered',
+                    delivered_at = %s
+                WHERE license_key = %s
+                  AND target_device_id = %s
+                  AND sender_type = 'admin'
+                  AND status = 'queued'
+                  AND id = ANY(%s)
+                RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                          body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                          retargeted_from_device_id, retargeted_by, retargeted_at
+                """,
+                (now, auth_key, auth_dev, clean_ids),
+            )
+            updated_rows = cur.fetchall()
+            acknowledged_ids = [int(r["id"]) for r in updated_rows]
+
+            if acknowledged_ids:
+                plan = (lic.get("plan") or "trial").strip().lower()
+                exp = _as_utc(lic.get("expires_at"))
+                has_paid = bool(lic.get("has_paid_renewal", False))
+                ids_str = ",".join(str(i) for i in acknowledged_ids[:10])
+                _record_license_audit(
+                    cur,
+                    license_key=auth_key,
+                    action="messages_delivered",
+                    actor=f"client:{auth_dev[:12]}",
+                    previous_plan=plan,
+                    new_plan=plan,
+                    previous_expires_at=exp,
+                    new_expires_at=exp,
+                    previous_has_paid_renewal=has_paid,
+                    new_has_paid_renewal=has_paid,
+                    note=f"Client acknowledged delivery of {len(acknowledged_ids)} admin message(s) (ids={ids_str})",
+                )
+                logger.info(
+                    "[LICENSE MESSAGE DELIVERED] key=%s device=%s count=%d ids=%s",
+                    auth_key,
+                    auth_dev[:12],
+                    len(acknowledged_ids),
+                    ids_str,
+                )
+
+            cur.execute(
+                """
+                SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                       body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                       retargeted_from_device_id, retargeted_by, retargeted_at
+                FROM license_messages
+                WHERE license_key = %s
+                  AND target_device_id = %s
+                  AND sender_type = 'admin'
+                  AND id = ANY(%s)
+                ORDER BY created_at ASC, id ASC
+                """,
+                (auth_key, auth_dev, clean_ids),
+            )
+            current_msgs = [_serialize_license_message(r) for r in cur.fetchall()]
+
+    return {
+        "ok": True,
+        "acknowledged_ids": acknowledged_ids,
+        "delivered_at": now.isoformat() if acknowledged_ids else (current_msgs[0]["delivered_at"] if current_msgs else None),
+        "messages": current_msgs,
+    }
+
+
+@app.post("/api/v1/messages/mark-read")
+def client_mark_messages_read(req: ClientMessageAckRequest, request: Request):
+    """
+    Client read-receipt endpoint called when the operator opens the Messages Inbox and
+    views incoming admin messages. Transitions matching messages to `read` with `read_at`.
+    """
+    eff_key, eff_dev = _resolve_client_auth_pair(
+        request,
+        body_key=req.license_key,
+        body_device_id=req.device_id,
+        target_license_key=req.target_license_key,
+    )
+    clean_ids = sorted({int(mid) for mid in (req.message_ids or []) if int(mid) > 0})[:200]
+    if not clean_ids:
+        raise HTTPException(status_code=400, detail="At least one valid message_id is required.")
+
+    client_ip = _client_ip(request)
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            lic = _authenticate_client_messaging(cur, eff_key, eff_dev, client_ip)
+            auth_key = str(lic["license_key"])
+            auth_dev = str(lic["device_id"])
+            reader = f"device:{auth_dev[:12]}"
+
+            cur.execute(
+                """
+                UPDATE license_messages
+                SET status = 'read',
+                    delivered_at = COALESCE(delivered_at, %s),
+                    read_at = %s,
+                    read_by = %s
+                WHERE license_key = %s
+                  AND target_device_id = %s
+                  AND sender_type = 'admin'
+                  AND status IN ('queued', 'delivered')
+                  AND id = ANY(%s)
+                RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                          body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                          retargeted_from_device_id, retargeted_by, retargeted_at
+                """,
+                (now, now, reader, auth_key, auth_dev, clean_ids),
+            )
+            updated_rows = cur.fetchall()
+            read_ids = [int(r["id"]) for r in updated_rows]
+
+            if read_ids:
+                plan = (lic.get("plan") or "trial").strip().lower()
+                exp = _as_utc(lic.get("expires_at"))
+                has_paid = bool(lic.get("has_paid_renewal", False))
+                ids_str = ",".join(str(i) for i in read_ids[:10])
+                _record_license_audit(
+                    cur,
+                    license_key=auth_key,
+                    action="messages_client_read",
+                    actor=f"client:{auth_dev[:12]}",
+                    previous_plan=plan,
+                    new_plan=plan,
+                    previous_expires_at=exp,
+                    new_expires_at=exp,
+                    previous_has_paid_renewal=has_paid,
+                    new_has_paid_renewal=has_paid,
+                    note=f"Client opened and marked {len(read_ids)} admin message(s) read (ids={ids_str})",
+                )
+                logger.info(
+                    "[LICENSE MESSAGE CLIENT_READ] key=%s device=%s count=%d ids=%s",
+                    auth_key,
+                    auth_dev[:12],
+                    len(read_ids),
+                    ids_str,
+                )
+
+            cur.execute(
+                """
+                SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                       body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                       retargeted_from_device_id, retargeted_by, retargeted_at
+                FROM license_messages
+                WHERE license_key = %s
+                  AND target_device_id = %s
+                  AND sender_type = 'admin'
+                  AND id = ANY(%s)
+                ORDER BY created_at ASC, id ASC
+                """,
+                (auth_key, auth_dev, clean_ids),
+            )
+            current_msgs = [_serialize_license_message(r) for r in cur.fetchall()]
+
+    return {
+        "ok": True,
+        "read_ids": read_ids,
+        "read_at": now.isoformat() if read_ids else (current_msgs[0]["read_at"] if current_msgs else None),
+        "messages": current_msgs,
+    }
+
+
+@app.get("/api/v1/admin/messages/inbox")
+def admin_list_messages_inbox(
+    q: str | None = Query(default=None),
+    filter: str = Query(default="all"),
+    _auth: dict = Depends(_require_admin_api),
+):
+    """
+    Admin Inbox listing per-license conversations sorted by latest activity.
+    Supports searching by license key / label / note / device ID and filtering
+    by `all`, `unread` (has unread client messages), or `read`.
+    """
+    flt = (filter or "all").strip().lower()
+    if flt not in {"all", "unread", "read"}:
+        raise HTTPException(status_code=400, detail="Invalid filter. Use 'all', 'unread', or 'read'.")
+    search_q = (q or "").strip().lower()
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, status, plan, expires_at, device_id,
+                       app_version, last_seen, note, label
+                FROM licenses
+                ORDER BY license_key ASC
+                """
+            )
+            lic_rows = cur.fetchall()
+            lic_map = {str(r["license_key"]): r for r in lic_rows}
+
+            cur.execute(
+                """
+                SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                       body, status, created_at, delivered_at, read_at
+                FROM license_messages
+                ORDER BY created_at ASC, id ASC
+                """
+            )
+            msg_rows = cur.fetchall()
+
+    threads: dict[str, dict] = {}
+    for m in msg_rows:
+        key = str(m["license_key"])
+        lic = lic_map.get(key)
+        if lic is None:
+            continue
+        entry = threads.get(key)
+        if entry is None:
+            entry = {
+                "license_key": key,
+                "label": lic.get("label") or None,
+                "note": lic.get("note") or None,
+                "license_status": _effective_license_status_str(lic, now=now),
+                "plan": (lic.get("plan") or "trial").strip().lower(),
+                "device_id": lic.get("device_id") or None,
+                "app_version": lic.get("app_version") or None,
+                "last_seen": _iso_utc(lic.get("last_seen")),
+                "unread_count": 0,
+                "queued_count": 0,
+                "held_count": 0,
+                "total_messages": 0,
+                "last_message_id": None,
+                "last_message_preview": "",
+                "last_sender_type": None,
+                "last_message_status": None,
+                "last_activity_at": None,
+                "_sort_ts": datetime.min.replace(tzinfo=timezone.utc),
+                "_sort_id": 0,
+            }
+            threads[key] = entry
+
+        entry["total_messages"] += 1
+        st = str(m.get("status") or "")
+        stype = str(m.get("sender_type") or "")
+        if stype == "client" and st == "received":
+            entry["unread_count"] += 1
+        elif stype == "admin" and st == "queued":
+            entry["queued_count"] += 1
+        elif stype == "admin" and st == "held_device_changed":
+            entry["held_count"] += 1
+
+        created_dt = _as_utc(m.get("created_at")) or now
+        mid = int(m["id"])
+        if (created_dt, mid) >= (entry["_sort_ts"], entry["_sort_id"]):
+            raw_body = str(m.get("body") or "")
+            preview = raw_body if len(raw_body) <= 120 else raw_body[:117] + "..."
+            entry["_sort_ts"] = created_dt
+            entry["_sort_id"] = mid
+            entry["last_message_id"] = mid
+            entry["last_message_preview"] = preview
+            entry["last_sender_type"] = stype
+            entry["last_message_status"] = st
+            entry["last_activity_at"] = created_dt.isoformat()
+
+    all_convs = sorted(
+        threads.values(),
+        key=lambda c: (c["_sort_ts"], c["_sort_id"]),
+        reverse=True,
+    )
+    total_unread = sum(int(c["unread_count"]) for c in all_convs)
+
+    filtered_convs = []
+    for c in all_convs:
+        if flt == "unread" and c["unread_count"] <= 0:
+            continue
+        if flt == "read" and c["unread_count"] > 0:
+            continue
+        if search_q:
+            haystack = " ".join(
+                str(v or "").lower()
+                for v in (c["license_key"], c["label"], c["note"], c["device_id"])
+            )
+            if search_q not in haystack:
+                continue
+        clean_c = {k: v for k, v in c.items() if not k.startswith("_")}
+        filtered_convs.append(clean_c)
+
+    return {
+        "conversations": filtered_convs,
+        "total_unread": total_unread,
+        "total_conversations": len(all_convs),
+    }
+
+
+@app.get("/api/v1/admin/messages/conversation/{license_key}")
+def admin_get_conversation(
+    license_key: str,
+    mark_read: bool = Query(default=True),
+    auth: dict = Depends(_require_admin_api),
+):
+    """
+    Open a single license's full two-way conversation history in the Admin Inbox.
+    When `mark_read=true` (default), transitions incoming client messages from
+    `received` -> `read` with `read_at` and records the action in `license_audit_log`.
+    """
+    key = (license_key or "").strip()
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, status, plan, expires_at, has_paid_renewal,
+                       device_id, app_version, last_seen, note, label
+                FROM licenses
+                WHERE license_key = %s
+                """,
+                (key,),
+            )
+            lic = cur.fetchone()
+            if lic is None:
+                raise HTTPException(status_code=404, detail="License key not found.")
+
+            marked_read_ids: list[int] = []
+            if mark_read:
+                cur.execute(
+                    """
+                    UPDATE license_messages
+                    SET status = 'read',
+                        read_at = %s,
+                        read_by = %s
+                    WHERE license_key = %s
+                      AND sender_type = 'client'
+                      AND status = 'received'
+                    RETURNING id
+                    """,
+                    (now, actor, key),
+                )
+                marked_read_ids = [int(r["id"]) for r in cur.fetchall()]
+                if marked_read_ids:
+                    plan = (lic.get("plan") or "trial").strip().lower()
+                    exp = _as_utc(lic.get("expires_at"))
+                    has_paid = bool(lic.get("has_paid_renewal", False))
+                    ids_str = ",".join(str(i) for i in marked_read_ids[:10])
+                    _record_license_audit(
+                        cur,
+                        license_key=key,
+                        action="messages_read",
+                        actor=actor,
+                        previous_plan=plan,
+                        new_plan=plan,
+                        previous_expires_at=exp,
+                        new_expires_at=exp,
+                        previous_has_paid_renewal=has_paid,
+                        new_has_paid_renewal=has_paid,
+                        note=f"Admin opened conversation and marked {len(marked_read_ids)} client message(s) read (ids={ids_str})",
+                    )
+                    logger.info(
+                        "[LICENSE MESSAGE ADMIN_READ] actor=%s key=%s count=%d ids=%s",
+                        actor,
+                        key,
+                        len(marked_read_ids),
+                        ids_str,
+                    )
+
+            cur.execute(
+                """
+                SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                       body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                       retargeted_from_device_id, retargeted_by, retargeted_at
+                FROM license_messages
+                WHERE license_key = %s
+                ORDER BY created_at ASC, id ASC
+                """,
+                (key,),
+            )
+            messages = [_serialize_license_message(r) for r in cur.fetchall()]
+
+    return {
+        "license": {
+            "license_key": str(lic["license_key"]),
+            "label": lic.get("label") or None,
+            "note": lic.get("note") or None,
+            "status": _effective_license_status_str(lic, now=now),
+            "raw_status": (lic.get("status") or "active").strip().lower(),
+            "plan": (lic.get("plan") or "trial").strip().lower(),
+            "expires_at": _iso_utc(lic.get("expires_at")),
+            "device_id": lic.get("device_id") or None,
+            "app_version": lic.get("app_version") or None,
+            "last_seen": _iso_utc(lic.get("last_seen")),
+        },
+        "messages": messages,
+        "marked_read_ids": marked_read_ids,
+    }
+
+
+@app.post("/api/v1/admin/messages/send")
+def admin_send_message(req: AdminMessageSendRequest, auth: dict = Depends(_require_admin_api)):
+    """
+    Send an individual message strictly to ONE selected license and its currently bound
+    device_id. Stores the message in `queued` state (never `delivered` until the intended
+    client acknowledges receipt). Rejects broadcast wildcards, revoked licenses, and
+    unbound licenses so messages are never exposed to an unintended device.
+    """
+    key = (req.license_key or "").strip()
+    if not key or key.lower() in {"*", "all", "broadcast"} or any(ch in key for ch in (",", ";", " ", "\n", "\r")):
+        raise HTTPException(
+            status_code=400,
+            detail="A single specific license_key is required for individual messaging.",
+        )
+
+    body_text = _validate_message_body(req.body)
+    idem_key = _validate_idempotency_key(req.idempotency_key)
+    actor = str(auth.get("username") or auth.get("auth_type") or "admin")
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT license_key, status, plan, expires_at, has_paid_renewal, device_id, label
+                FROM licenses
+                WHERE license_key = %s
+                """,
+                (key,),
+            )
+            lic = cur.fetchone()
+            if lic is None:
+                raise HTTPException(status_code=404, detail="License key not found.")
+
+            raw_status = (lic.get("status") or "").strip().lower()
+            if raw_status in {"revoked", "suspended", "disabled"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot send an individual message to a revoked or inactive license.",
+                )
+
+            bound_dev = (lic.get("device_id") or "").strip()
+            if not bound_dev:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This license is currently unbound (no device activated). "
+                        "Individual messages require an active bound device to prevent unintended delivery."
+                    ),
+                )
+
+            if idem_key:
+                cur.execute(
+                    """
+                    SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                           body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                           retargeted_from_device_id, retargeted_by, retargeted_at
+                    FROM license_messages
+                    WHERE license_key = %s
+                      AND sender_type = 'admin'
+                      AND idempotency_key = %s
+                    """,
+                    (key, idem_key),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    return {
+                        "ok": True,
+                        "deduplicated": True,
+                        "message": _serialize_license_message(existing),
+                    }
+
+            cur.execute(
+                """
+                INSERT INTO license_messages (
+                    license_key, sender_type, sender_identity, target_device_id,
+                    body, status, idempotency_key, created_at
+                )
+                VALUES (%s, 'admin', %s, %s, %s, 'queued', %s, %s)
+                RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                          body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                          retargeted_from_device_id, retargeted_by, retargeted_at
+                """,
+                (key, actor, bound_dev, body_text, idem_key, now),
+            )
+            inserted = cur.fetchone()
+            msg = _serialize_license_message(inserted)
+
+            plan = (lic.get("plan") or "trial").strip().lower()
+            exp = _as_utc(lic.get("expires_at"))
+            has_paid = bool(lic.get("has_paid_renewal", False))
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="message_sent",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=f"Queued admin message #{msg['id']} for device {bound_dev[:12]} (len={len(body_text)})",
+            )
+
+    logger.info(
+        "[LICENSE MESSAGE] id=%s dir=admin->client actor=%s key=%s target_device=%s status=queued len=%d",
+        msg["id"],
+        actor,
+        key,
+        bound_dev[:12],
+        len(body_text),
+    )
+    return {
+        "ok": True,
+        "deduplicated": False,
+        "message": msg,
+    }
+
+
+@app.post("/api/v1/admin/messages/{message_id}/retarget")
+def admin_retarget_held_message(
+    message_id: int,
+    req: AdminMessageRetargetRequest,
+    auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    Explicit SystemOwner policy for outgoing messages held when a license's bound device
+    was unbound/transferred (`status = 'held_device_changed'`):
+      - action='retarget': explicitly re-targets the held message to the license's newly
+        bound device_id and re-queues it (`status = 'queued'`), recording full audit lineage.
+      - action='cancel': cancels delivery permanently (`status = 'cancelled'`).
+    """
+    action = (req.action or "retarget").strip().lower()
+    if action not in {"retarget", "cancel"}:
+        raise HTTPException(status_code=400, detail="Action must be 'retarget' or 'cancel'.")
+    actor = str(auth.get("username") or auth.get("auth_type") or "owner")
+    now = _utc_now()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, license_key, sender_type, sender_identity, target_device_id,
+                       body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                       retargeted_from_device_id, retargeted_by, retargeted_at
+                FROM license_messages
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (int(message_id),),
+            )
+            msg_row = cur.fetchone()
+            if msg_row is None:
+                raise HTTPException(status_code=404, detail="Message not found.")
+            if msg_row.get("sender_type") != "admin":
+                raise HTTPException(status_code=400, detail="Only outgoing admin messages can be retargeted.")
+            if msg_row.get("status") != "held_device_changed":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Message #{message_id} is in status '{msg_row.get('status')}', not 'held_device_changed'.",
+                )
+
+            key = str(msg_row["license_key"])
+            prev_dev = (msg_row.get("target_device_id") or "").strip() or None
+
+            cur.execute(
+                "SELECT license_key, status, plan, expires_at, has_paid_renewal, device_id FROM licenses WHERE license_key = %s",
+                (key,),
+            )
+            lic = cur.fetchone()
+            if lic is None:
+                raise HTTPException(status_code=404, detail="Associated license not found.")
+            plan = (lic.get("plan") or "trial").strip().lower()
+            exp = _as_utc(lic.get("expires_at"))
+            has_paid = bool(lic.get("has_paid_renewal", False))
+
+            if action == "cancel":
+                cur.execute(
+                    """
+                    UPDATE license_messages
+                    SET status = 'cancelled',
+                        retargeted_by = %s,
+                        retargeted_at = %s
+                    WHERE id = %s
+                    RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                              body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                              retargeted_from_device_id, retargeted_by, retargeted_at
+                    """,
+                    (actor, now, int(message_id)),
+                )
+                updated = _serialize_license_message(cur.fetchone())
+                _record_license_audit(
+                    cur,
+                    license_key=key,
+                    action="message_cancelled",
+                    actor=actor,
+                    previous_plan=plan,
+                    new_plan=plan,
+                    previous_expires_at=exp,
+                    new_expires_at=exp,
+                    previous_has_paid_renewal=has_paid,
+                    new_has_paid_renewal=has_paid,
+                    note=f"Cancelled held admin message #{message_id} (previous device={prev_dev[:12] if prev_dev else 'none'})",
+                )
+                logger.info("[LICENSE MESSAGE CANCELLED] id=%s actor=%s key=%s", message_id, actor, key)
+                return {"ok": True, "action": "cancel", "message": updated}
+
+            # action == "retarget"
+            if (lic.get("status") or "").strip().lower() in {"revoked", "suspended", "disabled"}:
+                raise HTTPException(status_code=409, detail="Cannot retarget a message for a revoked license.")
+            current_dev = (lic.get("device_id") or "").strip()
+            if not current_dev:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot retarget message while license is unbound. Wait for the new device to bind first.",
+                )
+
+            cur.execute(
+                """
+                UPDATE license_messages
+                SET status = 'queued',
+                    retargeted_from_device_id = %s,
+                    target_device_id = %s,
+                    retargeted_by = %s,
+                    retargeted_at = %s
+                WHERE id = %s
+                RETURNING id, license_key, sender_type, sender_identity, target_device_id,
+                          body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
+                          retargeted_from_device_id, retargeted_by, retargeted_at
+                """,
+                (prev_dev, current_dev, actor, now, int(message_id)),
+            )
+            updated = _serialize_license_message(cur.fetchone())
+            _record_license_audit(
+                cur,
+                license_key=key,
+                action="message_retargeted",
+                actor=actor,
+                previous_plan=plan,
+                new_plan=plan,
+                previous_expires_at=exp,
+                new_expires_at=exp,
+                previous_has_paid_renewal=has_paid,
+                new_has_paid_renewal=has_paid,
+                note=(
+                    f"Explicitly retargeted held admin message #{message_id} from "
+                    f"{prev_dev[:12] if prev_dev else 'none'} to {current_dev[:12]}"
+                ),
+            )
+            logger.info(
+                "[LICENSE MESSAGE RETARGETED] id=%s actor=%s key=%s from=%s to=%s",
+                message_id,
+                actor,
+                key,
+                prev_dev[:12] if prev_dev else "none",
+                current_dev[:12],
+            )
+            return {"ok": True, "action": "retarget", "message": updated}
 
 
 @app.get("/", include_in_schema=False)

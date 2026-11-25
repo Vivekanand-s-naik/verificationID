@@ -1331,6 +1331,192 @@
         min-height: 42px;
       }
     }
+
+    /* =====================================================================
+       INBOX TAB — TWO-WAY INDIVIDUAL LICENSE MESSAGING
+       ===================================================================== */
+    .inbox-layout {
+      display: grid;
+      grid-template-columns: 350px minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    @media (max-width: 920px) {
+      .inbox-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .inbox-pane {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .inbox-pane-head {
+      padding: 12px 14px;
+      background: var(--surface-subtle);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .inbox-list-controls {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .inbox-list {
+      max-height: 620px;
+      overflow-y: auto;
+    }
+
+    .inbox-item {
+      width: 100%;
+      text-align: left;
+      background: var(--surface);
+      border: none;
+      border-bottom: 1px solid var(--border);
+      border-left: 3px solid transparent;
+      padding: 11px 13px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: background 0.12s ease;
+    }
+
+    .inbox-item:hover {
+      background: var(--surface-subtle);
+    }
+
+    .inbox-item.has-unread {
+      border-left-color: var(--blue);
+      background: #f8fbff;
+    }
+
+    .inbox-item.active {
+      background: #eff6ff;
+      border-left-color: var(--primary);
+    }
+
+    .inbox-item-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .inbox-item-preview {
+      font-size: 0.81rem;
+      color: var(--text-soft);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .inbox-item-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 0.74rem;
+      color: var(--text-muted);
+    }
+
+    .msg-feed {
+      padding: 14px;
+      min-height: 300px;
+      max-height: 470px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: #fafbfc;
+    }
+
+    .msg-bubble {
+      max-width: 86%;
+      padding: 10px 13px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .msg-bubble.from-client {
+      align-self: flex-start;
+      border-left: 3px solid var(--blue);
+    }
+
+    .msg-bubble.from-admin {
+      align-self: flex-end;
+      background: #f8fafc;
+      border-right: 3px solid var(--primary);
+    }
+
+    .msg-bubble.is-held {
+      border-color: var(--amber-border);
+      border-right: 3px solid var(--amber);
+      background: var(--amber-bg);
+    }
+
+    .msg-bubble-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px 12px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .msg-body {
+      font-size: 0.87rem;
+      color: var(--text);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.48;
+    }
+
+    .msg-timestamps {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .msg-composer {
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .msg-composer-foot {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
   </style>
 </head>
 
@@ -1361,6 +1547,9 @@
       </button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="licenses">
         Licenses <span id="licenses-count" class="count-pill">0</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="inbox">
+        Inbox <span id="inbox-unread-count" class="count-pill">0</span>
       </button>
       <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
         History <span id="history-count" class="count-pill">0</span>
@@ -1459,7 +1648,61 @@
       </div>
     </section>
 
-    <!-- TAB 4: HISTORY -->
+    <!-- TAB 4: INBOX (TWO-WAY INDIVIDUAL LICENSE MESSAGING) -->
+    <section id="panel-inbox" class="panel" role="tabpanel">
+      <div class="inbox-layout">
+        <!-- Left pane: conversations list -->
+        <div class="inbox-pane">
+          <div class="inbox-pane-head">
+            <div>
+              <h2 class="card-title">Support Inbox</h2>
+              <div id="inbox-list-meta" style="font-size:0.75rem; color:var(--text-muted);">Individual license-linked conversations</div>
+            </div>
+            <button type="button" id="inbox-new-msg-btn" class="btn btn-primary btn-sm">+ New Message</button>
+          </div>
+          <div class="inbox-list-controls">
+            <input id="inbox-search" class="search-input" style="max-width:100%;" type="search"
+              placeholder="Search license key, label, note, or device..." aria-label="Search inbox conversations" />
+            <div class="filter-pills" style="margin-bottom:0;">
+              <button type="button" class="pill-btn active" data-inbox-filter="all">All</button>
+              <button type="button" class="pill-btn" data-inbox-filter="unread">Unread</button>
+              <button type="button" class="pill-btn" data-inbox-filter="read">Read</button>
+            </div>
+          </div>
+          <div id="inbox-list" class="inbox-list">
+            <div class="empty-state" style="border:none; border-radius:0;">Loading conversations...</div>
+          </div>
+        </div>
+
+        <!-- Right pane: active thread -->
+        <div class="inbox-pane">
+          <div id="inbox-thread-header" class="inbox-pane-head">
+            <div>
+              <h2 class="card-title">Select a Conversation</h2>
+              <div style="font-size:0.78rem; color:var(--text-muted);">Choose a license thread on the left or click "+ New Message" to message an individual license.</div>
+            </div>
+          </div>
+          <div id="inbox-thread-messages" class="msg-feed">
+            <div class="empty-state" style="margin:auto;">No conversation selected.</div>
+          </div>
+          <form id="inbox-reply-form" class="msg-composer" style="display:none;">
+            <div class="field" style="margin:0;">
+              <label for="inbox-reply-body" id="inbox-reply-label">Reply to selected license</label>
+              <textarea id="inbox-reply-body" maxlength="2000" placeholder="Type a direct message for this specific license..." required></textarea>
+            </div>
+            <div class="msg-composer-foot">
+              <span id="inbox-reply-counter" style="font-size:0.76rem; color:var(--text-muted);">0 / 2000</span>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <span id="inbox-reply-warning" style="font-size:0.76rem; color:var(--red-text); display:none;"></span>
+                <button type="submit" id="inbox-reply-btn" class="btn btn-primary btn-sm">Send Message</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: HISTORY -->
     <section id="panel-history" class="panel" role="tabpanel">
       <div class="card">
         <div class="card-head">
@@ -1862,6 +2105,39 @@
     </div>
   </div>
 
+  <div id="new-message-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="new-msg-modal-title">
+    <div class="reset-modal-card" style="max-width: 560px; border-top-color: var(--primary);">
+      <div>
+        <div class="card-eyebrow">Individual License Messaging (Not a Broadcast)</div>
+        <h2 id="new-msg-modal-title" class="card-title" style="margin-top:2px;">New Message to Specific License</h2>
+      </div>
+      <form id="new-message-form" style="display:flex; flex-direction:column; gap:10px;">
+        <div class="field" style="margin:0;">
+          <label for="new-msg-license-filter">Search License (by key, label, note, or device ID)</label>
+          <input id="new-msg-license-filter" type="search" placeholder="Type to filter individual licenses..." autocomplete="off" />
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="new-msg-license-select">Select Individual Recipient License</label>
+          <select id="new-msg-license-select" required></select>
+        </div>
+        <div id="new-msg-target-preview" class="reset-preview" style="margin:0;">
+          Select a license to verify its identity and device binding status before sending.
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="new-msg-body">Message Content (max 2000 characters)</label>
+          <textarea id="new-msg-body" maxlength="2000" placeholder="Write a private message strictly for this individual license..." required></textarea>
+        </div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span id="new-msg-counter" style="font-size:0.76rem; color:var(--text-muted);">0 / 2000</span>
+          <div class="reset-modal-actions">
+            <button type="button" id="new-msg-cancel" class="btn">Cancel</button>
+            <button type="submit" id="new-msg-submit" class="btn btn-primary">Send to Selected License</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="lightbox" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment screenshot preview">
     <div class="modal-content">
       <div class="modal-head">
@@ -1909,6 +2185,12 @@
         provisionModalKey: null,
         provisionModalDevice: null,
         provisionModalLabel: null,
+        inboxConversations: [],
+        inboxTotalUnread: 0,
+        inboxFilter: "all",
+        inboxSearch: "",
+        selectedInboxKey: null,
+        selectedConversation: null,
       };
 
       const toastEl = document.getElementById("toast");
@@ -2034,6 +2316,8 @@
           loadAdminPlans().catch(function () { });
         } else if (tabName === "client-rbac") {
           loadDeviceRbacAccounts().catch(function () { });
+        } else if (tabName === "inbox") {
+          loadInbox().catch(function () { });
         }
       }
 
@@ -2162,6 +2446,7 @@
             '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
             '<td data-label="Actions">' +
             '<div class="row-actions">' +
+            '<button type="button" class="btn btn-sm" data-lic-action="message-license" title="Open individual message thread or send a message to this license">Message</button>' +
             '<button type="button" class="btn btn-sm" data-lic-action="edit-label" title="Set or update human-friendly display label">Edit Label</button>' +
             (isRevoked
               ? '<button type="button" class="btn btn-success btn-sm" data-lic-action="reactivate">Reactivate</button>'
@@ -2523,15 +2808,23 @@
           const isRemoteProv = act === "remote_credentials_provisioned";
           const isRemoteConsumed = act === "remote_credentials_consumed";
           const isRemoteRejected = act === "remote_credentials_rejected";
+          const isMsgSent = act === "message_sent";
+          const isMsgRead = act === "messages_read" || act === "messages_client_read";
+          const isMsgDelivered = act === "messages_delivered";
+          const isMsgHeld = act === "messages_held_on_unbind";
+          const isMsgRetargeted = act === "message_retargeted";
+          const isMsgCancelled = act === "message_cancelled";
           const badgeCls = isReset
             ? "badge-handover"
-            : (isRevoked || isDeleted || isRemoteRejected
+            : (isRevoked || isDeleted || isRemoteRejected || isMsgCancelled
               ? "badge-revoked"
-              : (isUnbind || isTrialOverride || isRemoteProv
+              : (isUnbind || isTrialOverride || isRemoteProv || isMsgHeld
                 ? "badge-expired"
-                : (isSetting || isPlanChange || isLabelUpdated
+                : (isSetting || isPlanChange || isLabelUpdated || isMsgRetargeted
                   ? "badge-owner"
-                  : (isBound || isReactivated || isCreated || isRemoteConsumed ? "badge-active" : "badge-renew"))));
+                  : (isMsgSent || isMsgRead || isMsgDelivered
+                    ? "badge-pending"
+                    : (isBound || isReactivated || isCreated || isRemoteConsumed ? "badge-active" : "badge-renew")))));
           const badgeTxt = isReset
             ? "HANDOVER RESET"
             : (isDeleted
@@ -2552,15 +2845,27 @@
                             ? "REMOTE CREDS APPLIED"
                             : (isRemoteRejected
                               ? "REMOTE CREDS BLOCKED"
-                              : (isSetting
-                                ? "SETTING UPDATED"
-                                : (isPlanChange
-                                  ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
-                                  : (isUnbind
-                                    ? "DEVICE UNBOUND"
-                                    : (isBound
-                                      ? "DEVICE BOUND"
-                                      : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL"))))))))))))));
+                              : (isMsgSent
+                                ? "MESSAGE SENT"
+                                : (isMsgDelivered
+                                  ? "MESSAGE DELIVERED"
+                                  : (isMsgRead
+                                    ? (act === "messages_client_read" ? "CLIENT READ MSG" : "ADMIN READ MSG")
+                                    : (isMsgHeld
+                                      ? "MESSAGES HELD"
+                                      : (isMsgRetargeted
+                                        ? "MSG RETARGETED"
+                                        : (isMsgCancelled
+                                          ? "MSG CANCELLED"
+                                          : (isSetting
+                                            ? "SETTING UPDATED"
+                                            : (isPlanChange
+                                              ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
+                                              : (isUnbind
+                                                ? "DEVICE UNBOUND"
+                                                : (isBound
+                                                  ? "DEVICE BOUND"
+                                                  : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))))))))))))))))));
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
@@ -3203,11 +3508,317 @@
         const session = await apiFetch("/api/v1/admin/session");
         applySessionHeader(session);
 
-        const jobs = [loadPending(), loadLicenses(), loadHistory(), loadAuditLog(), loadSummary()];
+        const jobs = [loadPending(), loadLicenses(), loadInbox(), loadHistory(), loadAuditLog(), loadSummary()];
         if (session.is_owner) {
           jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions(), loadDeviceRbacAccounts(), loadDeviceTrials());
         }
         await Promise.all(jobs);
+      }
+
+      /* =====================================================================
+         INBOX — TWO-WAY INDIVIDUAL LICENSE MESSAGING LOGIC
+         ===================================================================== */
+      function makeIdempotencyKey(prefix) {
+        return (prefix || "adm") + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+      }
+
+      function msgStatusMeta(msg) {
+        const st = (msg.status || "").toLowerCase();
+        if (st === "received") return { label: "Received", cls: "badge-pending" };
+        if (st === "queued") return { label: "Queued", cls: "badge-pending" };
+        if (st === "delivered") return { label: "Delivered", cls: "badge-active" };
+        if (st === "read") return { label: "Read", cls: "badge-active" };
+        if (st === "held_device_changed") return { label: "Held — Device Changed", cls: "badge-expired" };
+        if (st === "cancelled") return { label: "Cancelled", cls: "badge-revoked" };
+        return { label: st || "Unknown", cls: "badge-admin" };
+      }
+
+      function renderInboxList() {
+        const pill = document.getElementById("inbox-unread-count");
+        if (pill) {
+          pill.textContent = String(state.inboxTotalUnread || 0);
+          pill.classList.toggle("has-alert", Number(state.inboxTotalUnread || 0) > 0);
+        }
+        const meta = document.getElementById("inbox-list-meta");
+        const list = state.inboxConversations || [];
+        if (meta) {
+          meta.textContent = list.length + (list.length === 1 ? " conversation" : " conversations") +
+            (state.inboxTotalUnread > 0 ? " · " + state.inboxTotalUnread + " unread" : " · all read");
+        }
+        const root = document.getElementById("inbox-list");
+        if (!root) return;
+        if (!list.length) {
+          root.innerHTML = '<div class="empty-state" style="border:none; border-radius:0;">No conversations match this view yet. Click <strong>+ New Message</strong> to contact a specific license.</div>';
+          return;
+        }
+        root.innerHTML = list.map(function (c) {
+          const isSelected = state.selectedInboxKey === c.license_key;
+          const hasUnread = Number(c.unread_count || 0) > 0;
+          const cls = "inbox-item" + (hasUnread ? " has-unread" : "") + (isSelected ? " active" : "");
+          const title = c.label
+            ? '<strong>' + escapeHtml(c.label) + '</strong>'
+            : '<strong class="mono">' + escapeHtml(c.license_key) + '</strong>';
+          const subKey = c.label
+            ? '<div class="mono" style="font-size:0.74rem; color:var(--text-muted);">' + escapeHtml(c.license_key) + '</div>'
+            : '';
+          const unreadBadge = hasUnread
+            ? '<span class="badge badge-pending">' + escapeHtml(c.unread_count) + ' unread</span>'
+            : (c.held_count > 0
+              ? '<span class="badge badge-expired">' + escapeHtml(c.held_count) + ' held</span>'
+              : (c.queued_count > 0
+                ? '<span class="badge badge-admin">' + escapeHtml(c.queued_count) + ' queued</span>'
+                : '<span style="font-size:0.72rem; color:var(--text-muted);">Read</span>'));
+          const senderPrefix = c.last_sender_type === "admin" ? "You: " : "Client: ";
+          const devSnippet = c.device_id ? "Dev " + c.device_id.slice(0, 12) : "Unbound";
+          const notePart = c.note ? " · " + c.note : "";
+          return (
+            '<button type="button" class="' + cls + '" data-inbox-key="' + escapeHtml(c.license_key) + '">' +
+            '<div class="inbox-item-top">' +
+            '<div style="min-width:0; overflow:hidden; text-overflow:ellipsis;">' + title + subKey + '</div>' +
+            unreadBadge +
+            '</div>' +
+            '<div class="inbox-item-preview">' + escapeHtml(senderPrefix + (c.last_message_preview || "")) + '</div>' +
+            '<div class="inbox-item-meta">' +
+            '<span class="mono" style="overflow:hidden; text-overflow:ellipsis; max-width:210px; white-space:nowrap;">' + escapeHtml(devSnippet + notePart) + '</span>' +
+            '<span class="tabular">' + escapeHtml(formatRelative(c.last_activity_at) || "") + '</span>' +
+            '</div>' +
+            '</button>'
+          );
+        }).join("");
+      }
+
+      function renderInboxThread() {
+        const hdr = document.getElementById("inbox-thread-header");
+        const feed = document.getElementById("inbox-thread-messages");
+        const form = document.getElementById("inbox-reply-form");
+        const replyLabel = document.getElementById("inbox-reply-label");
+        const replyBtn = document.getElementById("inbox-reply-btn");
+        const replyWarn = document.getElementById("inbox-reply-warning");
+        const replyBody = document.getElementById("inbox-reply-body");
+
+        const conv = state.selectedConversation;
+        if (!conv || !conv.license) {
+          hdr.innerHTML =
+            '<div><h2 class="card-title">Select a Conversation</h2>' +
+            '<div style="font-size:0.78rem; color:var(--text-muted);">Choose a license thread on the left or click "+ New Message" to message an individual license.</div></div>';
+          feed.innerHTML = '<div class="empty-state" style="margin:auto;">No conversation selected.</div>';
+          if (form) form.style.display = "none";
+          return;
+        }
+
+        const lic = conv.license;
+        const st = (lic.status || "active").toLowerCase();
+        const badgeCls = st === "revoked" ? "badge-revoked" : (st === "expired" ? "badge-expired" : "badge-active");
+        const bindingHtml = lic.device_id
+          ? 'Bound Device: <span class="mono"><strong>' + escapeHtml(lic.device_id) + '</strong></span>'
+          : '<span style="color:var(--red-text); font-weight:600;">Unbound (no device currently activated)</span>';
+        const noteHtml = lic.note ? ' &middot; Customer: ' + escapeHtml(lic.note) : '';
+        const seenHtml = lic.last_seen ? ' &middot; Last seen ' + escapeHtml(formatDate(lic.last_seen)) : '';
+
+        hdr.innerHTML =
+          '<div style="min-width:0; flex:1 1 260px;">' +
+          '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">' +
+          '<h2 class="card-title" style="margin:0;">' + escapeHtml(lic.label || lic.license_key) + '</h2>' +
+          '<span class="mono" style="font-size:0.8rem; color:var(--text-soft);">' + escapeHtml(lic.license_key) + '</span>' +
+          '<span class="badge ' + badgeCls + '">' + escapeHtml(st.toUpperCase()) + '</span>' +
+          '<span class="badge badge-admin">' + escapeHtml(lic.plan || "trial") + '</span>' +
+          '</div>' +
+          '<div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px;">' +
+          bindingHtml + noteHtml + seenHtml +
+          '</div>' +
+          '</div>' +
+          '<button type="button" id="inbox-refresh-thread-btn" class="btn btn-sm">Refresh Thread</button>';
+
+        const msgs = conv.messages || [];
+        const isOwner = Boolean(state.session && state.session.is_owner);
+        if (!msgs.length) {
+          feed.innerHTML = '<div class="empty-state" style="margin:auto;">No messages exchanged with <strong class="mono">' + escapeHtml(lic.license_key) + '</strong> yet. Send the first message below.</div>';
+        } else {
+          feed.innerHTML = msgs.map(function (m) {
+            const isAdmin = m.sender_type === "admin";
+            const isHeld = m.status === "held_device_changed";
+            const cls = "msg-bubble " + (isAdmin ? "from-admin" : "from-client") + (isHeld ? " is-held" : "");
+            const sm = msgStatusMeta(m);
+            const senderTag = isAdmin
+              ? '<strong>Admin</strong> (' + escapeHtml(m.sender_identity || "admin") + ')'
+              : '<strong>Client</strong> (' + escapeHtml(m.sender_identity || "device") + ')';
+            const tsParts = ['<span>Created: ' + escapeHtml(formatDate(m.created_at)) + '</span>'];
+            if (m.delivered_at) tsParts.push('<span>Delivered: ' + escapeHtml(formatDate(m.delivered_at)) + '</span>');
+            if (m.read_at) tsParts.push('<span>Read: ' + escapeHtml(formatDate(m.read_at)) + (m.read_by ? ' by ' + escapeHtml(m.read_by) : '') + '</span>');
+            if (m.target_device_id) tsParts.push('<span class="mono">Target dev: ' + escapeHtml(m.target_device_id.slice(0, 12)) + '</span>');
+            if (m.retargeted_from_device_id) {
+              tsParts.push('<span class="mono">Retargeted from ' + escapeHtml(m.retargeted_from_device_id.slice(0, 12)) + ' by ' + escapeHtml(m.retargeted_by || "owner") + '</span>');
+            }
+
+            let heldControls = "";
+            if (isHeld) {
+              heldControls =
+                '<div style="margin-top:6px; padding-top:6px; border-top:1px solid var(--amber-border); font-size:0.78rem; color:#78350f;">' +
+                '<div><strong>Held for Device Safety:</strong> The license was unbound after this message was queued, so it will not be delivered to a replacement PC unless explicitly re-targeted.</div>' +
+                (isOwner
+                  ? '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">' +
+                    (lic.device_id
+                      ? '<button type="button" class="btn btn-primary btn-sm" data-msg-retarget="retarget" data-msg-id="' + escapeHtml(m.id) + '">Re-target to Current Device (' + escapeHtml(lic.device_id.slice(0, 12)) + ')</button>'
+                      : '<span style="font-size:0.76rem; color:var(--text-muted);">Re-targeting available once a new device binds this license.</span>') +
+                    '<button type="button" class="btn btn-danger-outline btn-sm" data-msg-retarget="cancel" data-msg-id="' + escapeHtml(m.id) + '">Cancel Delivery</button>' +
+                    '</div>'
+                  : '') +
+                '</div>';
+            }
+
+            return (
+              '<div class="' + cls + '" data-msg-id="' + escapeHtml(m.id) + '">' +
+              '<div class="msg-bubble-head">' +
+              '<span>' + senderTag + ' <span class="mono" style="color:var(--text-muted);">#' + escapeHtml(m.id) + '</span></span>' +
+              '<span class="badge ' + sm.cls + '">' + escapeHtml(sm.label) + '</span>' +
+              '</div>' +
+              '<div class="msg-body">' + escapeHtml(m.body) + '</div>' +
+              '<div class="msg-timestamps">' + tsParts.join("") + '</div>' +
+              heldControls +
+              '</div>'
+            );
+          }).join("");
+          feed.scrollTop = feed.scrollHeight;
+        }
+
+        if (form) {
+          form.style.display = "flex";
+          const canSend = st !== "revoked" && Boolean(lic.device_id);
+          if (replyLabel) {
+            replyLabel.textContent = "Direct message strictly to " + (lic.label ? lic.label + " (" + lic.license_key + ")" : lic.license_key);
+          }
+          if (replyBtn) {
+            replyBtn.disabled = !canSend;
+            replyBtn.textContent = "Send to " + lic.license_key;
+          }
+          if (replyBody) replyBody.disabled = !canSend;
+          if (replyWarn) {
+            if (st === "revoked") {
+              replyWarn.textContent = "Revoked license — outgoing messages disabled.";
+              replyWarn.style.display = "inline";
+            } else if (!lic.device_id) {
+              replyWarn.textContent = "Unbound license — wait for device activation before sending.";
+              replyWarn.style.display = "inline";
+            } else if (st === "expired") {
+              replyWarn.textContent = "Expired license — message will remain queued until renewed.";
+              replyWarn.style.display = "inline";
+            } else {
+              replyWarn.textContent = "";
+              replyWarn.style.display = "none";
+            }
+          }
+        }
+      }
+
+      async function loadInbox() {
+        const qs = new URLSearchParams();
+        qs.set("filter", state.inboxFilter || "all");
+        if (state.inboxSearch && state.inboxSearch.trim()) {
+          qs.set("q", state.inboxSearch.trim());
+        }
+        const res = await apiFetch("/api/v1/admin/messages/inbox?" + qs.toString());
+        state.inboxConversations = (res && res.conversations) || [];
+        state.inboxTotalUnread = Number((res && res.total_unread) || 0);
+        renderInboxList();
+      }
+
+      async function openInboxConversation(licenseKey, opts) {
+        const options = opts || {};
+        const key = (licenseKey || "").trim();
+        if (!key) return;
+        state.selectedInboxKey = key;
+        renderInboxList();
+        const markRead = options.markRead === false ? "false" : "true";
+        const conv = await apiFetch(
+          "/api/v1/admin/messages/conversation/" + encodeURIComponent(key) + "?mark_read=" + markRead
+        );
+        state.selectedConversation = conv;
+        renderInboxThread();
+        if (conv && conv.marked_read_ids && conv.marked_read_ids.length) {
+          Promise.all([loadInbox(), loadAuditLog()]).catch(function () { });
+        }
+      }
+
+      function populateNewMessageLicenseSelect(preselectKey) {
+        const filterEl = document.getElementById("new-msg-license-filter");
+        const selEl = document.getElementById("new-msg-license-select");
+        if (!selEl) return;
+        const q = (filterEl ? filterEl.value : "").trim().toLowerCase();
+        const list = (state.licenses || []).filter(function (lic) {
+          if (!q) return true;
+          return (
+            (lic.license_key || "").toLowerCase().includes(q) ||
+            (lic.label || "").toLowerCase().includes(q) ||
+            (lic.note || "").toLowerCase().includes(q) ||
+            (lic.device_id || "").toLowerCase().includes(q)
+          );
+        });
+        if (!list.length) {
+          selEl.innerHTML = '<option value="">No matching licenses found</option>';
+          updateNewMessageTargetPreview();
+          return;
+        }
+        const targetVal = preselectKey || selEl.value || list[0].license_key;
+        selEl.innerHTML = list.map(function (lic) {
+          const eff = effectiveLicenseStatus(lic);
+          const bindTxt = lic.device_id ? "Bound " + lic.device_id.slice(0, 10) : "Unbound";
+          const txt = (lic.label ? lic.label + " — " : "") + lic.license_key + " [" + eff.toUpperCase() + " · " + bindTxt + "]";
+          const selected = lic.license_key === targetVal ? " selected" : "";
+          return '<option value="' + escapeHtml(lic.license_key) + '"' + selected + '>' + escapeHtml(txt) + '</option>';
+        }).join("");
+        updateNewMessageTargetPreview();
+      }
+
+      function updateNewMessageTargetPreview() {
+        const selEl = document.getElementById("new-msg-license-select");
+        const prevEl = document.getElementById("new-msg-target-preview");
+        const submitBtn = document.getElementById("new-msg-submit");
+        if (!selEl || !prevEl) return;
+        const key = selEl.value || "";
+        const lic = (state.licenses || []).find(function (l) { return l.license_key === key; });
+        if (!lic) {
+          prevEl.innerHTML = '<span style="color:var(--text-muted);">Select an individual license above.</span>';
+          if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = "Send to Selected License";
+          }
+          return;
+        }
+        const eff = effectiveLicenseStatus(lic);
+        const badgeCls = eff === "revoked" ? "badge-revoked" : (eff === "expired" ? "badge-expired" : "badge-active");
+        const canSend = eff !== "revoked" && Boolean(lic.device_id);
+        const bindingLine = lic.device_id
+          ? '<span class="badge badge-active">Bound</span> <span class="mono">' + escapeHtml(lic.device_id) + '</span>'
+          : '<span class="badge badge-revoked">Unbound</span> <span style="color:var(--red-text);">Cannot send until a device activates this license</span>';
+        prevEl.innerHTML =
+          '<div><strong>Recipient License:</strong> <span class="mono"><strong>' + escapeHtml(lic.license_key) + '</strong></span>' +
+          (lic.label ? ' &middot; <strong>' + escapeHtml(lic.label) + '</strong>' : '') + '</div>' +
+          '<div style="margin-top:4px;"><strong>Status / Plan:</strong> <span class="badge ' + badgeCls + '">' + escapeHtml(eff.toUpperCase()) + '</span> ' + escapeHtml(lic.plan || "trial") +
+          (lic.note ? ' &middot; Customer: ' + escapeHtml(lic.note) : '') + '</div>' +
+          '<div style="margin-top:4px;"><strong>Device Binding:</strong> ' + bindingLine + '</div>' +
+          (eff === "expired" && lic.device_id
+            ? '<div style="margin-top:4px; color:var(--amber-text); font-size:0.78rem;">Note: License is currently expired; message will stay queued until the client renews.</div>'
+            : '');
+        if (submitBtn) {
+          submitBtn.disabled = !canSend;
+          submitBtn.textContent = "Send to " + lic.license_key;
+        }
+      }
+
+      function openNewMessageModal(preselectKey) {
+        const filterEl = document.getElementById("new-msg-license-filter");
+        const bodyEl = document.getElementById("new-msg-body");
+        const cntEl = document.getElementById("new-msg-counter");
+        if (filterEl) filterEl.value = "";
+        if (bodyEl) bodyEl.value = "";
+        if (cntEl) cntEl.textContent = "0 / 2000";
+        populateNewMessageLicenseSelect(preselectKey || "");
+        document.getElementById("new-message-modal").classList.add("open");
+        if (bodyEl && preselectKey) setTimeout(function () { bodyEl.focus(); }, 30);
+      }
+
+      function closeNewMessageModal() {
+        document.getElementById("new-message-modal").classList.remove("open");
       }
 
       document.querySelectorAll(".tab-btn").forEach(function (btn) {
@@ -3609,7 +4220,13 @@
         if (!licenseKey) return;
         const action = btn.dataset.licAction;
 
-        if (action === "edit-label") {
+        if (action === "message-license") {
+          setActiveTab("inbox");
+          openInboxConversation(licenseKey).catch(function (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          });
+          return;
+        } else if (action === "edit-label") {
           const licObj = state.licenses.find(function (l) { return l.license_key === licenseKey; });
           openEditLabelModal(licenseKey, licObj ? licObj.label : "");
           return;
@@ -4006,6 +4623,190 @@
       document.getElementById("lightbox").addEventListener("click", function (evt) {
         if (evt.target.id === "lightbox") closeLightbox();
       });
+
+      /* Inbox Event Listeners */
+      const inboxSearchEl = document.getElementById("inbox-search");
+      let inboxSearchTimer = null;
+      if (inboxSearchEl) {
+        inboxSearchEl.addEventListener("input", function (evt) {
+          state.inboxSearch = evt.target.value || "";
+          if (inboxSearchTimer) clearTimeout(inboxSearchTimer);
+          inboxSearchTimer = setTimeout(function () {
+            loadInbox().catch(function () { });
+          }, 180);
+        });
+      }
+
+      document.querySelectorAll("[data-inbox-filter]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          state.inboxFilter = btn.dataset.inboxFilter || "all";
+          document.querySelectorAll("[data-inbox-filter]").forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+          });
+          loadInbox().catch(function (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          });
+        });
+      });
+
+      const inboxListEl = document.getElementById("inbox-list");
+      if (inboxListEl) {
+        inboxListEl.addEventListener("click", function (evt) {
+          const item = evt.target.closest("[data-inbox-key]");
+          if (!item) return;
+          const key = item.dataset.inboxKey || "";
+          if (!key) return;
+          openInboxConversation(key).catch(function (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          });
+        });
+      }
+
+      const inboxHdrEl = document.getElementById("inbox-thread-header");
+      if (inboxHdrEl) {
+        inboxHdrEl.addEventListener("click", function (evt) {
+          if (evt.target.closest("#inbox-refresh-thread-btn") && state.selectedInboxKey) {
+            Promise.all([loadInbox(), openInboxConversation(state.selectedInboxKey)]).catch(function (err) {
+              if (err.message !== "Session expired") showToast(err.message, "error");
+            });
+          }
+        });
+      }
+
+      const inboxFeedEl = document.getElementById("inbox-thread-messages");
+      if (inboxFeedEl) {
+        inboxFeedEl.addEventListener("click", async function (evt) {
+          const btn = evt.target.closest("button[data-msg-retarget]");
+          if (!btn) return;
+          const msgId = Number(btn.dataset.msgId);
+          const action = btn.dataset.msgRetarget || "";
+          if (!msgId || (action !== "retarget" && action !== "cancel")) return;
+          const confirmTxt = action === "retarget"
+            ? "Explicitly re-target held message #" + msgId + " to the license's currently bound device and queue delivery?"
+            : "Permanently cancel delivery of held message #" + msgId + "?";
+          if (!window.confirm(confirmTxt)) return;
+          btn.disabled = true;
+          try {
+            await apiFetch("/api/v1/admin/messages/" + encodeURIComponent(msgId) + "/retarget", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: action }),
+            });
+            await Promise.all([
+              loadInbox(),
+              loadAuditLog(),
+              state.selectedInboxKey ? openInboxConversation(state.selectedInboxKey, { markRead: false }) : Promise.resolve(),
+            ]);
+            showToast(action === "retarget" ? "Message #" + msgId + " retargeted and queued." : "Message #" + msgId + " cancelled.", "success");
+          } catch (err) {
+            btn.disabled = false;
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          }
+        });
+      }
+
+      const inboxReplyBody = document.getElementById("inbox-reply-body");
+      const inboxReplyCounter = document.getElementById("inbox-reply-counter");
+      if (inboxReplyBody && inboxReplyCounter) {
+        inboxReplyBody.addEventListener("input", function () {
+          inboxReplyCounter.textContent = String(inboxReplyBody.value.length) + " / 2000";
+        });
+      }
+
+      const inboxReplyForm = document.getElementById("inbox-reply-form");
+      if (inboxReplyForm) {
+        inboxReplyForm.addEventListener("submit", async function (evt) {
+          evt.preventDefault();
+          const key = state.selectedInboxKey;
+          if (!key) return;
+          const body = (inboxReplyBody.value || "").trim();
+          if (!body) {
+            showToast("Enter a message first.", "error");
+            return;
+          }
+          const btn = document.getElementById("inbox-reply-btn");
+          btn.disabled = true;
+          btn.textContent = "Sending...";
+          try {
+            await apiFetch("/api/v1/admin/messages/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                license_key: key,
+                body: body,
+                idempotency_key: makeIdempotencyKey("reply"),
+              }),
+            });
+            inboxReplyBody.value = "";
+            if (inboxReplyCounter) inboxReplyCounter.textContent = "0 / 2000";
+            await Promise.all([loadInbox(), loadAuditLog(), openInboxConversation(key, { markRead: false })]);
+            showToast("Message queued for " + key + ".", "success");
+          } catch (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          } finally {
+            btn.disabled = false;
+            renderInboxThread();
+          }
+        });
+      }
+
+      const newMsgBtn = document.getElementById("inbox-new-msg-btn");
+      if (newMsgBtn) {
+        newMsgBtn.addEventListener("click", function () {
+          openNewMessageModal(state.selectedInboxKey || "");
+        });
+      }
+      document.getElementById("new-msg-cancel").addEventListener("click", closeNewMessageModal);
+      document.getElementById("new-message-modal").addEventListener("click", function (evt) {
+        if (evt.target.id === "new-message-modal") closeNewMessageModal();
+      });
+      document.getElementById("new-msg-license-filter").addEventListener("input", function () {
+        populateNewMessageLicenseSelect("");
+      });
+      document.getElementById("new-msg-license-select").addEventListener("change", updateNewMessageTargetPreview);
+      const newMsgBodyEl = document.getElementById("new-msg-body");
+      const newMsgCounterEl = document.getElementById("new-msg-counter");
+      if (newMsgBodyEl && newMsgCounterEl) {
+        newMsgBodyEl.addEventListener("input", function () {
+          newMsgCounterEl.textContent = String(newMsgBodyEl.value.length) + " / 2000";
+        });
+      }
+      document.getElementById("new-message-form").addEventListener("submit", async function (evt) {
+        evt.preventDefault();
+        const key = (document.getElementById("new-msg-license-select").value || "").trim();
+        const body = (newMsgBodyEl.value || "").trim();
+        if (!key) {
+          showToast("Select an individual license first.", "error");
+          return;
+        }
+        if (!body) {
+          showToast("Enter a message before sending.", "error");
+          return;
+        }
+        const btn = document.getElementById("new-msg-submit");
+        btn.disabled = true;
+        btn.textContent = "Sending...";
+        try {
+          await apiFetch("/api/v1/admin/messages/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              license_key: key,
+              body: body,
+              idempotency_key: makeIdempotencyKey("new"),
+            }),
+          });
+          closeNewMessageModal();
+          await Promise.all([loadInbox(), loadAuditLog(), openInboxConversation(key, { markRead: false })]);
+          showToast("Individual message queued for " + key + ".", "success");
+        } catch (err) {
+          if (err.message !== "Session expired") showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          updateNewMessageTargetPreview();
+        }
+      });
+
       document.addEventListener("keydown", function (evt) {
         if (evt.key === "Escape") {
           closeLightbox();
@@ -4013,6 +4814,7 @@
           closeEditLabelModal();
           closeDeleteLicenseModal();
           closeProvisionCredsModal();
+          closeNewMessageModal();
         }
       });
 

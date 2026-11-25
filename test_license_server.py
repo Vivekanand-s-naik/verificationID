@@ -54,12 +54,14 @@ class FakePostgresDB:
         self.contact_messages: list[dict] = []
         self.remote_credential_provisions: list[dict] = []
         self.device_rbac_accounts: dict[tuple[str, str], dict] = {}
+        self.license_messages: list[dict] = []
         self._next_sub_id = 1
         self._next_admin_id = 1
         self._next_audit_id = 1
         self._next_broadcast_id = 1
         self._next_contact_id = 1
         self._next_prov_id = 1
+        self._next_message_id = 1
         self.executed_sql: list[str] = []
 
     @contextmanager
@@ -815,6 +817,171 @@ class _FakeCursor:
         if "FROM device_rbac_accounts ORDER BY device_id ASC, username ASC" in norm:
             ordered = sorted(self.db.device_rbac_accounts.values(), key=lambda r: (r["device_id"], r["username"]))
             self._rows = [dict(r) for r in ordered]
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'held_device_changed'"):
+            key, prev_dev = params
+            for m in self.db.license_messages:
+                if (
+                    m["license_key"] == key
+                    and m["sender_type"] == "admin"
+                    and m["status"] == "queued"
+                    and (m.get("target_device_id") is None or m.get("target_device_id") == prev_dev)
+                ):
+                    m["status"] = "held_device_changed"
+                    self.rowcount += 1
+            return
+
+        if norm.startswith("INSERT INTO license_messages"):
+            if "'client'" in norm:
+                lic_key, sender_id, target_dev, body_text, idem_key, created_at = params
+                sender_type, status = "client", "received"
+            else:
+                lic_key, sender_id, target_dev, body_text, idem_key, created_at = params
+                sender_type, status = "admin", "queued"
+            row = {
+                "id": self.db._next_message_id,
+                "license_key": lic_key,
+                "sender_type": sender_type,
+                "sender_identity": sender_id,
+                "target_device_id": target_dev,
+                "body": body_text,
+                "status": status,
+                "idempotency_key": idem_key,
+                "created_at": created_at,
+                "delivered_at": None,
+                "read_at": None,
+                "read_by": None,
+                "retargeted_from_device_id": None,
+                "retargeted_by": None,
+                "retargeted_at": None,
+            }
+            self.db._next_message_id += 1
+            self.db.license_messages.append(row)
+            self._rows = [dict(row)]
+            self.rowcount = 1
+            return
+
+        if "FROM license_messages WHERE license_key = %s AND sender_type = 'client' AND idempotency_key = %s" in norm:
+            key, idem = params
+            m = next((r for r in self.db.license_messages if r["license_key"] == key and r["sender_type"] == "client" and r.get("idempotency_key") == idem), None)
+            self._rows = [dict(m)] if m else []
+            return
+
+        if "FROM license_messages WHERE license_key = %s AND sender_type = 'admin' AND idempotency_key = %s" in norm:
+            key, idem = params
+            m = next((r for r in self.db.license_messages if r["license_key"] == key and r["sender_type"] == "admin" and r.get("idempotency_key") == idem), None)
+            self._rows = [dict(m)] if m else []
+            return
+
+        if "FROM license_messages WHERE license_key = %s AND target_device_id = %s AND status NOT IN" in norm:
+            if "AND id > %s" in norm:
+                key, dev, since_id = params
+            else:
+                key, dev = params
+                since_id = 0
+            rows = [
+                dict(m)
+                for m in self.db.license_messages
+                if m["license_key"] == key
+                and m.get("target_device_id") == dev
+                and m["status"] not in ("held_device_changed", "cancelled")
+                and m["id"] > int(since_id)
+            ]
+            rows.sort(key=lambda r: (r["created_at"], r["id"]))
+            self._rows = rows
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'delivered'"):
+            now_dt, key, dev, id_list = params
+            id_set = {int(x) for x in id_list}
+            out = []
+            for m in self.db.license_messages:
+                if m["license_key"] == key and m.get("target_device_id") == dev and m["sender_type"] == "admin" and m["status"] == "queued" and m["id"] in id_set:
+                    m["status"] = "delivered"
+                    m["delivered_at"] = now_dt
+                    out.append(dict(m))
+            self._rows = out
+            self.rowcount = len(out)
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'read', delivered_at = COALESCE"):
+            now_dt, read_dt, reader, key, dev, id_list = params
+            id_set = {int(x) for x in id_list}
+            out = []
+            for m in self.db.license_messages:
+                if m["license_key"] == key and m.get("target_device_id") == dev and m["sender_type"] == "admin" and m["status"] in ("queued", "delivered") and m["id"] in id_set:
+                    m["status"] = "read"
+                    m["delivered_at"] = m["delivered_at"] or now_dt
+                    m["read_at"] = read_dt
+                    m["read_by"] = reader
+                    out.append(dict(m))
+            self._rows = out
+            self.rowcount = len(out)
+            return
+
+        if "FROM license_messages WHERE license_key = %s AND target_device_id = %s AND sender_type = 'admin' AND id = ANY(%s)" in norm:
+            key, dev, id_list = params
+            id_set = {int(x) for x in id_list}
+            rows = [dict(m) for m in self.db.license_messages if m["license_key"] == key and m.get("target_device_id") == dev and m["sender_type"] == "admin" and m["id"] in id_set]
+            rows.sort(key=lambda r: (r["created_at"], r["id"]))
+            self._rows = rows
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'read', read_at = %s, read_by = %s"):
+            now_dt, actor, key = params
+            out = []
+            for m in self.db.license_messages:
+                if m["license_key"] == key and m["sender_type"] == "client" and m["status"] == "received":
+                    m["status"] = "read"
+                    m["read_at"] = now_dt
+                    m["read_by"] = actor
+                    out.append({"id": m["id"]})
+            self._rows = out
+            self.rowcount = len(out)
+            return
+
+        if "FROM license_messages WHERE license_key = %s ORDER BY created_at ASC, id ASC" in norm:
+            key = params[0]
+            rows = [dict(m) for m in self.db.license_messages if m["license_key"] == key]
+            rows.sort(key=lambda r: (r["created_at"], r["id"]))
+            self._rows = rows
+            return
+
+        if "FROM license_messages ORDER BY created_at ASC, id ASC" in norm:
+            rows = [dict(m) for m in self.db.license_messages]
+            rows.sort(key=lambda r: (r["created_at"], r["id"]))
+            self._rows = rows
+            return
+
+        if "FROM license_messages WHERE id = %s" in norm:
+            mid = int(params[0])
+            m = next((r for r in self.db.license_messages if r["id"] == mid), None)
+            self._rows = [dict(m)] if m else []
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'cancelled'"):
+            actor, now_dt, mid = params
+            for m in self.db.license_messages:
+                if m["id"] == int(mid):
+                    m["status"] = "cancelled"
+                    m["retargeted_by"] = actor
+                    m["retargeted_at"] = now_dt
+                    self._rows = [dict(m)]
+                    self.rowcount = 1
+            return
+
+        if norm.startswith("UPDATE license_messages SET status = 'queued', retargeted_from_device_id = %s"):
+            prev_dev, curr_dev, actor, now_dt, mid = params
+            for m in self.db.license_messages:
+                if m["id"] == int(mid):
+                    m["status"] = "queued"
+                    m["retargeted_from_device_id"] = prev_dev
+                    m["target_device_id"] = curr_dev
+                    m["retargeted_by"] = actor
+                    m["retargeted_at"] = now_dt
+                    self._rows = [dict(m)]
+                    self.rowcount = 1
             return
 
         raise AssertionError(f"Unhandled SQL in test fake: {norm}")
