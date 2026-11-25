@@ -778,3 +778,60 @@ def test_real_pg_label_delete_trial_clear_and_rbac_directory_end_to_end(pg_env):
     # GET endpoints NEVER return the one-time password
     dir_after = client.get("/api/v1/admin/device-rbac-accounts", headers=ADMIN_HDR).json()
     assert otp not in json.dumps(dir_after)
+
+
+def test_real_pg_device_trials_lookup_clear_and_fresh_reprovision(pg_env):
+    """
+    Real PostgreSQL 17 proof for the Dashboard Device Trials lookup -> clear -> re-provision workflow:
+      1. Device auto-provisions, then license is unbound/deleted -> device stuck on `trial_already_used`.
+      2. GET /api/v1/admin/device-trials?device_id=<prefix> shows `used=True`, `is_orphaned=True`,
+         `first_activated_at`, and `bound_license=None`.
+      3. POST /api/v1/admin/device-trials/override clears `device_trials` in real Postgres.
+      4. GET /api/v1/admin/device-trials?device_id=<full> shows `used=False`.
+      5. Same device calls POST /api/v1/activate-device -> succeeds with `status=active`, new trial key!
+    """
+    srv, client, _pub = pg_env
+    srv.init_db()
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    dev = "pg-stuck-dev-9988776655443322110"
+
+    # Initial activation
+    r1 = client.post("/api/v1/activate-device", json={"device_id": dev, "app_version": "1.0.0"})
+    assert r1.status_code == 200 and r1.json()["status"] == "active"
+    key1 = r1.json()["license_key"]
+
+    # Hard-delete license without clearing trial -> device becomes stuck
+    d1 = client.post("/api/v1/admin/delete", params={"license_key": key1}, headers=ADMIN_HDR)
+    assert d1.status_code == 200 and d1.json()["device_trial_cleared"] is False
+
+    stuck = client.post("/api/v1/activate-device", json={"device_id": dev, "app_version": "1.0.0"})
+    assert stuck.status_code == 200 and stuck.json()["status"] == "trial_already_used"
+
+    # Lookup via prefix in real Postgres
+    info = client.get("/api/v1/admin/device-trials", params={"device_id": "pg-stuck-dev-9988"}, headers=ADMIN_HDR).json()
+    assert info["device_id"] == dev
+    assert info["used"] is True
+    assert info["is_orphaned"] is True
+    assert info["first_license_key"] == key1
+    assert info["first_activated_at"] is not None
+    assert info["bound_license"] is None
+
+    # Clear from dashboard override endpoint
+    ov = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": dev, "note": "Real PG dashboard clear proof"},
+        headers=ADMIN_HDR,
+    )
+    assert ov.status_code == 200 and ov.json()["cleared"] is True
+
+    # Lookup now reports not used
+    info2 = client.get("/api/v1/admin/device-trials", params={"device_id": dev}, headers=ADMIN_HDR).json()
+    assert info2["used"] is False
+
+    # Same device now auto-provisions a fresh active 180-day trial!
+    r2 = client.post("/api/v1/activate-device", json={"device_id": dev, "app_version": "1.0.0"})
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "active"
+    assert r2.json()["newly_provisioned"] is True
+    assert r2.json()["license_key"] != key1

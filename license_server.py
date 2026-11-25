@@ -3192,6 +3192,139 @@ def delete_license(
     }
 
 
+@app.get("/api/v1/admin/device-trials")
+def get_admin_device_trials(
+    device_id: str | None = Query(
+        default=None,
+        description="Optional device_id (exact or prefix) to inspect current trial status before clearing.",
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    _auth: dict = Depends(_require_owner_or_token),
+):
+    """
+    SystemOwner-only: inspect `device_trials` records alongside any currently bound `licenses` row.
+    - When `device_id` is supplied (exact or unambiguous prefix): returns that device's trial status
+      (`used`, `first_activated_at`, `first_license_key`, `note`, `bound_license`, `is_orphaned`)
+      so SystemOwner has full context before deliberately clearing a stuck trial record.
+    - When `device_id` is omitted: lists recent `device_trials` rows (flagging orphaned records that
+      have no bound license row and would receive `trial_already_used`).
+    """
+    query = (device_id or "").strip()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT device_id, first_license_key, first_activated_at, note
+                FROM device_trials
+                ORDER BY first_activated_at DESC, device_id ASC
+                LIMIT %s
+                """,
+                (500 if query else limit,),
+            )
+            dt_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT license_key, label, status, plan, expires_at, device_id
+                FROM licenses
+                WHERE device_id IS NOT NULL
+                ORDER BY license_key ASC
+                """
+            )
+            lic_rows = cur.fetchall()
+
+    bound_by_dev: dict[str, dict] = {}
+    for r in lic_rows:
+        dev = (r.get("device_id") or "").strip()
+        if dev:
+            bound_by_dev[dev] = {
+                "license_key": str(r["license_key"]),
+                "label": r.get("label"),
+                "status": str(r.get("status") or "active").strip().lower(),
+                "plan": str(r.get("plan") or "trial").strip().lower(),
+                "expires_at": _iso_utc(r.get("expires_at")),
+            }
+
+    def _serialize_trial(row: dict) -> dict:
+        did = str(row["device_id"])
+        bound = bound_by_dev.get(did)
+        return {
+            "device_id": did,
+            "used": True,
+            "first_license_key": row.get("first_license_key"),
+            "first_activated_at": _iso_utc(row.get("first_activated_at")),
+            "note": row.get("note") or "",
+            "bound_license": bound,
+            "is_orphaned": bound is None,
+        }
+
+    all_trials = [_serialize_trial(r) for r in dt_rows]
+
+    if query:
+        q_low = query.lower()
+        exact = next((t for t in all_trials if t["device_id"].lower() == q_low), None)
+        if exact is not None:
+            return {
+                "query": query,
+                **exact,
+                "ambiguous": False,
+                "matches": [exact],
+            }
+
+        prefix_matches = [t for t in all_trials if t["device_id"].lower().startswith(q_low)]
+        if len(prefix_matches) == 1:
+            match = prefix_matches[0]
+            return {
+                "query": query,
+                **match,
+                "ambiguous": False,
+                "matches": [match],
+            }
+        if len(prefix_matches) > 1:
+            return {
+                "query": query,
+                "device_id": None,
+                "used": True,
+                "first_license_key": None,
+                "first_activated_at": None,
+                "note": f"Multiple ({len(prefix_matches)}) device trial records match prefix '{query}'. Pick the exact device_id.",
+                "bound_license": None,
+                "is_orphaned": False,
+                "ambiguous": True,
+                "matches": prefix_matches[:20],
+            }
+
+        # Not present in device_trials -> check if any bound license matches query
+        bound_match = None
+        for did, binfo in bound_by_dev.items():
+            if did.lower() == q_low or did.lower().startswith(q_low):
+                bound_match = binfo
+                query_dev = did
+                break
+        else:
+            query_dev = query
+
+        return {
+            "query": query,
+            "device_id": query_dev,
+            "used": False,
+            "first_license_key": None,
+            "first_activated_at": None,
+            "note": "",
+            "bound_license": bound_match,
+            "is_orphaned": False,
+            "ambiguous": False,
+            "matches": [],
+        }
+
+    return {
+        "trials": all_trials[:limit],
+        "total": len(all_trials),
+        "orphaned_count": sum(1 for t in all_trials if t["is_orphaned"]),
+    }
+
+
 @app.post("/api/v1/admin/device-trials/override")
 def override_device_trial_history(
     req: DeviceTrialOverrideRequest,

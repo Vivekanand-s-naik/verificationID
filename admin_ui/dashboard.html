@@ -1424,6 +1424,39 @@
           aria-label="Filter licenses" />
       </div>
       <div id="licenses-container"></div>
+
+      <div id="device-trials-card" class="card hidden" style="margin-top:16px;">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">SystemOwner // One-Trial-Per-Device Registry</div>
+            <h2 class="card-title">Device Trials — Look Up &amp; Clear Trial Record</h2>
+            <p class="card-subtitle">
+              A device can retain a trial-used record even when it has no bound license row (causing <span class="mono">trial_already_used</span>).
+              Look up any <span class="mono">device_id</span> (full ID or prefix) to inspect its current trial status and first activation date before deliberately clearing it.
+            </p>
+          </div>
+          <span class="badge badge-owner">System Owner</span>
+        </div>
+
+        <form id="device-trial-lookup-form" style="display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; margin-bottom:12px;">
+          <div class="field" style="flex:1 1 280px; margin:0;">
+            <label for="device-trial-lookup-input">Device ID (full 32-char ID or prefix, e.g. f5293092de55)</label>
+            <input id="device-trial-lookup-input" type="text" placeholder="Enter device_id to inspect trial status..." autocomplete="off" spellcheck="false" required />
+          </div>
+          <button type="submit" id="device-trial-lookup-btn" class="btn btn-primary">Check Trial Status</button>
+        </form>
+
+        <div id="device-trial-status-box" style="display:none; border:1px solid var(--border); background:var(--surface-subtle); border-radius:var(--radius-sm); padding:12px; margin-bottom:14px;"></div>
+
+        <div>
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+            <strong style="font-size:0.84rem; color:var(--text-soft);">Recorded Device Trials <span id="device-trials-meta" style="font-weight:400; color:var(--text-muted);"></span></strong>
+          </div>
+          <div id="device-trials-list">
+            <div class="empty-state">Loading device trial records...</div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- TAB 4: HISTORY -->
@@ -1862,6 +1895,8 @@
         adminPlans: [],
         credentialProvisions: [],
         deviceRbacAccounts: [],
+        deviceTrials: [],
+        inspectedDeviceTrial: null,
         summary: null,
         accountData: null,
         licenseSearch: "",
@@ -2842,6 +2877,146 @@
         renderDeviceRbacAccounts();
       }
 
+      function renderDeviceTrialLookupResult(info) {
+        const box = document.getElementById("device-trial-status-box");
+        if (!box) return;
+        if (!info) {
+          box.style.display = "none";
+          box.innerHTML = "";
+          return;
+        }
+        state.inspectedDeviceTrial = info;
+        box.style.display = "block";
+
+        if (info.ambiguous && Array.isArray(info.matches) && info.matches.length) {
+          box.innerHTML =
+            '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;">' +
+            '<span class="badge badge-pending">Multiple Matches</span>' +
+            '<span style="font-size:0.83rem; color:var(--text-soft);">' + escapeHtml(info.note) + '</span>' +
+            '</div>' +
+            '<div style="display:flex; flex-direction:column; gap:6px;">' +
+            info.matches.map(function (m) {
+              return (
+                '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:7px 10px;">' +
+                '<div><strong class="mono">' + escapeHtml(m.device_id) + '</strong> · activated ' + escapeHtml(formatDate(m.first_activated_at)) + '</div>' +
+                '<button type="button" class="btn btn-sm" data-dt-inspect="' + escapeHtml(m.device_id) + '">Select</button>' +
+                '</div>'
+              );
+            }).join("") +
+            '</div>';
+          return;
+        }
+
+        const isUsed = Boolean(info.used);
+        const isOrphaned = Boolean(info.is_orphaned);
+        const badgeHtml = isUsed
+          ? (isOrphaned
+            ? '<span class="badge badge-revoked">Trial Used — Orphaned (No Bound License / Stuck on trial_already_used)</span>'
+            : '<span class="badge badge-expired">Trial Used (Currently Bound to License)</span>')
+          : '<span class="badge badge-active">Not Used — Eligible for Fresh Trial</span>';
+
+        const boundTxt = info.bound_license
+          ? (info.bound_license.label ? '<strong>' + escapeHtml(info.bound_license.label) + '</strong> — ' : '') +
+            '<span class="mono">' + escapeHtml(info.bound_license.license_key) + '</span> (' +
+            escapeHtml(info.bound_license.status) + ' / ' + escapeHtml(info.bound_license.plan) + ')'
+          : (isUsed
+            ? '<span style="color:var(--red-text); font-weight:500;">None (no bound license row — device will receive trial_already_used until cleared)</span>'
+            : '<span style="color:var(--text-muted);">None</span>');
+
+        const clearControlsHtml = isUsed
+          ? (
+            '<div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border); display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px;">' +
+            '<div class="field" style="flex:1 1 240px; margin:0;">' +
+            '<label for="device-trial-clear-note">Audit Reason (optional)</label>' +
+            '<input id="device-trial-clear-note" type="text" placeholder="e.g. Unblock dev PC for fresh trial testing" autocomplete="off" />' +
+            '</div>' +
+            '<button type="button" id="device-trial-clear-btn" class="btn btn-danger" data-dt-clear="' + escapeHtml(info.device_id) + '">Clear Trial Record</button>' +
+            '</div>'
+          )
+          : (
+            '<div style="margin-top:10px; font-size:0.81rem; color:var(--green-text);">' +
+            'No trial record exists for this device — launching the app will automatically provision a fresh trial.' +
+            '</div>'
+          );
+
+        box.innerHTML =
+          '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:10px;">' +
+          badgeHtml +
+          '<button type="button" class="btn btn-sm" id="device-trial-dismiss-btn">Dismiss</button>' +
+          '</div>' +
+          '<div class="kv-list">' +
+          '<span class="kv-label">Device ID</span><span class="mono"><strong>' + escapeHtml(info.device_id || info.query || "—") + '</strong></span>' +
+          '<span class="kv-label">Trial Status</span><span>' + (isUsed ? '<strong>Used</strong>' : 'Not Used') + '</span>' +
+          '<span class="kv-label">First Activated</span><span class="tabular">' + escapeHtml(formatDate(info.first_activated_at)) + '</span>' +
+          '<span class="kv-label">Original Trial Key</span><span class="mono">' + escapeHtml(info.first_license_key || "—") + '</span>' +
+          '<span class="kv-label">Bound License</span><span>' + boundTxt + '</span>' +
+          (info.note ? '<span class="kv-label">Record Note</span><span>' + escapeHtml(info.note) + '</span>' : '') +
+          '</div>' +
+          clearControlsHtml;
+      }
+
+      function renderDeviceTrialsList() {
+        const root = document.getElementById("device-trials-list");
+        const meta = document.getElementById("device-trials-meta");
+        if (!root) return;
+        const trials = state.deviceTrials || [];
+        const orphaned = trials.filter(function (t) { return t.is_orphaned; }).length;
+        if (meta) {
+          meta.textContent = "(" + trials.length + " total" + (orphaned > 0 ? " · " + orphaned + " orphaned / stuck" : "") + ")";
+        }
+        if (!trials.length) {
+          root.innerHTML = '<div class="empty-state">No device trial records exist yet.</div>';
+          return;
+        }
+        const rowsHtml = trials.map(function (t) {
+          const bindBadge = t.bound_license
+            ? '<span class="badge badge-active">Bound</span> <span class="mono">' + escapeHtml(t.bound_license.license_key) + '</span>' +
+              (t.bound_license.label ? ' <span style="color:var(--text-muted);">(' + escapeHtml(t.bound_license.label) + ')</span>' : '')
+            : '<span class="badge badge-revoked">No Bound License (Stuck)</span>';
+          return (
+            '<tr>' +
+            '<td data-label="Device ID"><strong class="mono">' + escapeHtml(t.device_id) + '</strong></td>' +
+            '<td data-label="First Activated" class="tabular">' + escapeHtml(formatDate(t.first_activated_at)) + '</td>' +
+            '<td data-label="Original Trial Key" class="mono">' + escapeHtml(t.first_license_key || "—") + '</td>' +
+            '<td data-label="Current Binding">' + bindBadge + '</td>' +
+            '<td data-label="Action">' +
+            '<button type="button" class="btn btn-sm" data-dt-inspect="' + escapeHtml(t.device_id) + '">Inspect / Clear</button>' +
+            '</td>' +
+            '</tr>'
+          );
+        }).join("");
+
+        root.innerHTML =
+          '<div class="table-wrap">' +
+          '<table class="ops-table">' +
+          '<thead><tr>' +
+          '<th>Device ID</th>' +
+          '<th>First Activated</th>' +
+          '<th>Original Trial Key</th>' +
+          '<th>Current Binding</th>' +
+          '<th>Action</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+          '</table>' +
+          '</div>';
+      }
+
+      async function loadDeviceTrials() {
+        if (!(state.session && state.session.is_owner)) return;
+        const res = await apiFetch("/api/v1/admin/device-trials?limit=100");
+        state.deviceTrials = (res && res.trials) || [];
+        renderDeviceTrialsList();
+      }
+
+      async function inspectDeviceTrial(deviceId) {
+        const clean = (deviceId || "").trim();
+        if (!clean) return;
+        const input = document.getElementById("device-trial-lookup-input");
+        if (input) input.value = clean;
+        const info = await apiFetch("/api/v1/admin/device-trials?device_id=" + encodeURIComponent(clean));
+        renderDeviceTrialLookupResult(info);
+      }
+
       async function loadCredentialProvisions() {
         if (!(state.session && state.session.is_owner)) return;
         state.credentialProvisions = await apiFetch("/api/v1/admin/credential-provisions?limit=150");
@@ -3018,7 +3193,7 @@
           "Signed in as " + (session.username || "admin") +
           (session.expires_at ? " · Session expires " + formatDate(session.expires_at) : "");
 
-        ["tab-account-btn", "tab-announcements-btn", "tab-plans-btn", "tab-client-rbac-btn"].forEach(function (id) {
+        ["tab-account-btn", "tab-announcements-btn", "tab-plans-btn", "tab-client-rbac-btn", "device-trials-card"].forEach(function (id) {
           const el = document.getElementById(id);
           if (el) el.classList.toggle("hidden", !isOwner);
         });
@@ -3030,7 +3205,7 @@
 
         const jobs = [loadPending(), loadLicenses(), loadHistory(), loadAuditLog(), loadSummary()];
         if (session.is_owner) {
-          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions(), loadDeviceRbacAccounts());
+          jobs.push(loadAccountData(), loadBroadcasts(), loadAdminPlans(), loadCredentialProvisions(), loadDeviceRbacAccounts(), loadDeviceTrials());
         }
         await Promise.all(jobs);
       }
@@ -3570,6 +3745,7 @@
           await Promise.all([loadLicenses(), loadSummary(), loadAuditLog()]);
           if (state.session && state.session.is_owner) {
             loadDeviceRbacAccounts().catch(function () { });
+            loadDeviceTrials().catch(function () { });
           }
           showToast(label ? "Updated label for " + key + " → " + label : "Cleared label for " + key, "success");
         } catch (err) {
@@ -3599,6 +3775,7 @@
           await Promise.all([loadLicenses(), loadSummary(), loadAuditLog()]);
           if (state.session && state.session.is_owner) {
             loadDeviceRbacAccounts().catch(function () { });
+            loadDeviceTrials().catch(function () { });
           }
           if (res.had_device_trial && res.previous_device_id) {
             showDeleteStep2(res.license_key, res.previous_device_id);
@@ -3630,7 +3807,7 @@
               note: "Explicitly cleared device_trials after deleting license " + (delKey || ""),
             }),
           });
-          await loadAuditLog();
+          await Promise.all([loadAuditLog(), loadDeviceTrials()]);
           closeDeleteLicenseModal();
           showToast("Cleared trial record for " + devId.slice(0, 12) + " — device can now auto-provision a fresh trial.", "success");
         } catch (err) {
@@ -3639,6 +3816,90 @@
           if (err.message !== "Session expired") showToast(err.message, "error");
         }
       });
+
+      const dtLookupForm = document.getElementById("device-trial-lookup-form");
+      if (dtLookupForm) {
+        dtLookupForm.addEventListener("submit", async function (evt) {
+          evt.preventDefault();
+          const input = document.getElementById("device-trial-lookup-input");
+          const btn = document.getElementById("device-trial-lookup-btn");
+          const query = (input && input.value || "").trim();
+          if (!query) {
+            showToast("Enter a device_id (or prefix) to check.", "error");
+            return;
+          }
+          btn.disabled = true;
+          btn.textContent = "Checking...";
+          try {
+            await inspectDeviceTrial(query);
+          } catch (err) {
+            if (err.message !== "Session expired") showToast(err.message, "error");
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "Check Trial Status";
+          }
+        });
+      }
+
+      const dtCard = document.getElementById("device-trials-card");
+      if (dtCard) {
+        dtCard.addEventListener("click", async function (evt) {
+          const dismissBtn = evt.target.closest("#device-trial-dismiss-btn");
+          if (dismissBtn) {
+            renderDeviceTrialLookupResult(null);
+            return;
+          }
+          const inspectBtn = evt.target.closest("button[data-dt-inspect]");
+          if (inspectBtn) {
+            const devId = inspectBtn.dataset.dtInspect || "";
+            if (!devId) return;
+            inspectBtn.disabled = true;
+            try {
+              await inspectDeviceTrial(devId);
+              const box = document.getElementById("device-trial-status-box");
+              if (box && typeof box.scrollIntoView === "function") {
+                box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+              }
+            } catch (err) {
+              if (err.message !== "Session expired") showToast(err.message, "error");
+            } finally {
+              inspectBtn.disabled = false;
+            }
+            return;
+          }
+          const clearBtn = evt.target.closest("button[data-dt-clear]");
+          if (clearBtn) {
+            const devId = clearBtn.dataset.dtClear || "";
+            if (!devId) return;
+            if (!window.confirm("Clear the trial-used record for device " + devId + "?\n\nThis allows the device to auto-provision a fresh free trial on its next launch.")) {
+              return;
+            }
+            const noteEl = document.getElementById("device-trial-clear-note");
+            const noteVal = (noteEl && noteEl.value || "").trim() || "Cleared from Dashboard Device Trials panel";
+            clearBtn.disabled = true;
+            clearBtn.textContent = "Clearing...";
+            try {
+              const res = await apiFetch("/api/v1/admin/device-trials/override", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ device_id: devId, note: noteVal }),
+              });
+              await Promise.all([loadDeviceTrials(), loadAuditLog()]);
+              await inspectDeviceTrial(devId);
+              showToast(
+                res.cleared
+                  ? "Cleared trial record for " + devId.slice(0, 12) + " — device can now auto-provision a fresh trial."
+                  : "No trial record was present for " + devId.slice(0, 12) + ".",
+                "success"
+              );
+            } catch (err) {
+              clearBtn.disabled = false;
+              clearBtn.textContent = "Clear Trial Record";
+              if (err.message !== "Session expired") showToast(err.message, "error");
+            }
+          }
+        });
+      }
 
       const rbacSearchEl = document.getElementById("rbac-device-search");
       if (rbacSearchEl) {

@@ -166,6 +166,16 @@ class _FakeCursor:
             self._rows = [dict(dt_row)] if dt_row else []
             return
 
+        if norm.startswith("SELECT") and "FROM device_trials ORDER BY first_activated_at DESC" in norm:
+            limit = int(params[0]) if params else 100
+            ordered = sorted(
+                self.db.device_trials.values(),
+                key=lambda r: (r["first_activated_at"], r["device_id"]),
+                reverse=True,
+            )
+            self._rows = [dict(r) for r in ordered[:limit]]
+            return
+
         if norm.startswith("DELETE FROM licenses WHERE license_key = %s"):
             key = params[0]
             if key in self.db.licenses:
@@ -2785,3 +2795,97 @@ def test_client_rbac_directory_sync_one_time_password_shown_once_and_dashboard_e
         'id="prov-otp-value"',
     ):
         assert required_id in dash_html, f"Missing {required_id} in dashboard.html"
+
+
+def test_device_trials_lookup_and_dashboard_clear_unblocks_stuck_device(env_client):
+    """
+    Verify Dashboard 'Device Trials' panel backend + UI flow:
+      1. Non-owner staff admin receives 403 on GET /api/v1/admin/device-trials.
+      2. A device that auto-provisioned and then had its license deleted (without clearing trial)
+         is stuck on `trial_already_used` with NO bound license row.
+      3. GET /api/v1/admin/device-trials?device_id=<prefix> finds it and reports:
+         `used=True`, `is_orphaned=True`, `first_activated_at`, `first_license_key`, `bound_license=None`.
+      4. Clearing via POST /api/v1/admin/device-trials/override switches GET lookup to `used=False`.
+      5. The same device immediately succeeds on POST /api/v1/activate-device with a fresh active trial!
+      6. Dashboard HTML exposes the dedicated Device Trials lookup/clear panel inside the Licenses tab.
+    """
+    client, db = env_client
+    srv._ACTIVATE_DEVICE_ATTEMPTS.clear()
+
+    dev_id = "stuck-test-pc-f5293092de550099aa"
+
+    # Non-owner staff admin blocked (403)
+    now = datetime.now(timezone.utc)
+    db.admin_users.append({
+        "id": 97,
+        "username": "staff-no-trials",
+        "password_hash": srv._hash_password("StaffTrials!97"),
+        "email": "staff97@example.com",
+        "role": "admin",
+        "created_at": now,
+        "updated_at": now,
+    })
+    st_hdr = {
+        "Authorization": "Bearer " + client.post(
+            "/api/v1/admin/login", json={"username": "staff-no-trials", "password": "StaffTrials!97"}
+        ).json()["token"]
+    }
+    assert client.get("/api/v1/admin/device-trials", headers=st_hdr).status_code == 403
+    client.cookies.clear()
+
+    # 1. Auto-provision then delete license (default preserves device_trials -> stuck!)
+    a1 = client.post("/api/v1/activate-device", json={"device_id": dev_id, "app_version": "1.0.0"})
+    assert a1.status_code == 200 and a1.json()["status"] == "active"
+    first_key = a1.json()["license_key"]
+
+    d1 = client.post("/api/v1/admin/delete", params={"license_key": first_key}, headers=ADMIN_HDR)
+    assert d1.status_code == 200 and d1.json()["device_trial_cleared"] is False
+
+    # Confirm device is stuck on trial_already_used
+    stuck = client.post("/api/v1/activate-device", json={"device_id": dev_id, "app_version": "1.0.0"})
+    assert stuck.status_code == 200 and stuck.json()["status"] == "trial_already_used"
+
+    # 2. Dashboard Device Trials list & prefix lookup show full context before clearing
+    lst = client.get("/api/v1/admin/device-trials", headers=ADMIN_HDR).json()
+    assert lst["orphaned_count"] >= 1
+    assert any(t["device_id"] == dev_id and t["is_orphaned"] is True for t in lst["trials"])
+
+    lookup = client.get("/api/v1/admin/device-trials", params={"device_id": "stuck-test-pc-f529"}, headers=ADMIN_HDR).json()
+    assert lookup["device_id"] == dev_id
+    assert lookup["used"] is True
+    assert lookup["is_orphaned"] is True
+    assert lookup["first_license_key"] == first_key
+    assert lookup["first_activated_at"] is not None
+    assert lookup["bound_license"] is None
+
+    # 3. Deliberate clear via /api/v1/admin/device-trials/override
+    clr = client.post(
+        "/api/v1/admin/device-trials/override",
+        json={"device_id": dev_id, "note": "Cleared from Dashboard Device Trials panel"},
+        headers=ADMIN_HDR,
+    )
+    assert clr.status_code == 200 and clr.json()["cleared"] is True
+
+    # Lookup immediately shows NOT USED
+    lookup_after = client.get("/api/v1/admin/device-trials", params={"device_id": dev_id}, headers=ADMIN_HDR).json()
+    assert lookup_after["used"] is False
+    assert lookup_after["first_activated_at"] is None
+
+    # 4. Same device now cleanly auto-provisions a brand-new active trial!
+    a2 = client.post("/api/v1/activate-device", json={"device_id": dev_id, "app_version": "1.0.0"})
+    assert a2.status_code == 200
+    assert a2.json()["status"] == "active"
+    assert a2.json()["newly_provisioned"] is True
+    assert a2.json()["license_key"] != first_key
+
+    # 5. Dashboard HTML exposes the standalone Device Trials panel inside #panel-licenses
+    dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
+    for required_id in (
+        'id="device-trials-card"',
+        'id="device-trial-lookup-form"',
+        'id="device-trial-lookup-input"',
+        'id="device-trial-status-box"',
+        'id="device-trials-list"',
+    ):
+        assert required_id in dash_html, f"Missing {required_id} in dashboard.html"
+    assert "Clear Trial Record" in dash_html
