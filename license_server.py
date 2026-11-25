@@ -2457,6 +2457,12 @@ def admin_login(req: AdminLoginRequest, request: Request, response: Response):
     submitted_user = (req.username or "").strip()
     submitted_pass = req.password or ""
 
+    def _mask_dbg(val: str | None) -> str:
+        s = val or ""
+        if len(s) <= 4:
+            return f"*** (len={len(s)})"
+        return f"{s[:2]}***{s[-2:]} (len={len(s)})"
+
     with get_db() as conn:
         with conn.cursor() as cur:
             _seed_initial_owner_user(cur)
@@ -2475,8 +2481,44 @@ def admin_login(req: AdminLoginRequest, request: Request, response: Response):
                 (submitted_user,),
             )
             user_row = cur.fetchone()
+            existing_rows_dbg = []
+            if user_row is None:
+                cur.execute(
+                    "SELECT id, username, role, LEFT(password_hash, 12) AS hp, LENGTH(password_hash) AS hl, password_hash FROM admin_users ORDER BY id LIMIT 3"
+                )
+                existing_rows_dbg = cur.fetchall()
 
-    if user_row is None or not _verify_password(submitted_pass, user_row.get("password_hash")):
+    pw_match = bool(user_row is not None and _verify_password(submitted_pass, user_row.get("password_hash")))
+    if user_row is None:
+        masked_rows = [
+            {
+                "id": r["id"],
+                "db_user": _mask_dbg(r.get("username")),
+                "role": r.get("role"),
+                "hash_prefix": r.get("hp"),
+                "hash_len": r.get("hl"),
+                "bcrypt_match_against_owner_row": _verify_password(submitted_pass, r.get("password_hash")),
+            }
+            for r in existing_rows_dbg
+        ]
+        logger.info(
+            "LOGIN_DEBUG received_user=%s received_pass=%s db_match_found=False existing_admin_users=%s",
+            _mask_dbg(submitted_user),
+            _mask_dbg(submitted_pass),
+            masked_rows,
+        )
+    else:
+        logger.info(
+            "LOGIN_DEBUG received_user=%s received_pass=%s db_match_found=True db_user=%s role=%s hash_len=%s pw_match=%s",
+            _mask_dbg(submitted_user),
+            _mask_dbg(submitted_pass),
+            _mask_dbg(user_row.get("username")),
+            user_row.get("role"),
+            len(user_row.get("password_hash") or ""),
+            pw_match,
+        )
+
+    if not pw_match:
         _record_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
