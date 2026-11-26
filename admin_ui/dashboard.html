@@ -2794,78 +2794,34 @@
         }
         root.innerHTML = entries.map(function (ev) {
           const act = (ev.action || "").toLowerCase();
-          const isReset = act === "reset_plan";
-          const isUnbind = act === "unbind_device";
-          const isBound = act === "device_bound";
-          const isRevoked = act === "revoked";
-          const isReactivated = act === "reactivated";
-          const isCreated = act === "license_created";
-          const isDeleted = act === "license_deleted";
-          const isLabelUpdated = act === "label_updated";
-          const isTrialOverride = act === "trial_override";
-          const isSetting = act === "setting_updated";
-          const isPlanChange = act === "plan_created" || act === "plan_updated";
-          const isRemoteProv = act === "remote_credentials_provisioned";
-          const isRemoteConsumed = act === "remote_credentials_consumed";
-          const isRemoteRejected = act === "remote_credentials_rejected";
-          const isMsgSent = act === "message_sent";
-          const isMsgRead = act === "messages_read" || act === "messages_client_read";
-          const isMsgDelivered = act === "messages_delivered";
-          const isMsgHeld = act === "messages_held_on_unbind";
-          const isMsgRetargeted = act === "message_retargeted";
-          const isMsgCancelled = act === "message_cancelled";
-          const badgeCls = isReset
-            ? "badge-handover"
-            : (isRevoked || isDeleted || isRemoteRejected || isMsgCancelled
-              ? "badge-revoked"
-              : (isUnbind || isTrialOverride || isRemoteProv || isMsgHeld
-                ? "badge-expired"
-                : (isSetting || isPlanChange || isLabelUpdated || isMsgRetargeted
-                  ? "badge-owner"
-                  : (isMsgSent || isMsgRead || isMsgDelivered
-                    ? "badge-pending"
-                    : (isBound || isReactivated || isCreated || isRemoteConsumed ? "badge-active" : "badge-renew")))));
-          const badgeTxt = isReset
-            ? "HANDOVER RESET"
-            : (isDeleted
-              ? "LICENSE DELETED"
-              : (isLabelUpdated
-                ? "LABEL UPDATED"
-                : (isRevoked
-                  ? "REVOKED"
-                  : (isReactivated
-                    ? "REACTIVATED"
-                    : (isCreated
-                      ? "CREATED"
-                      : (isTrialOverride
-                        ? "TRIAL OVERRIDE"
-                        : (isRemoteProv
-                          ? "REMOTE CREDS QUEUED"
-                          : (isRemoteConsumed
-                            ? "REMOTE CREDS APPLIED"
-                            : (isRemoteRejected
-                              ? "REMOTE CREDS BLOCKED"
-                              : (isMsgSent
-                                ? "MESSAGE SENT"
-                                : (isMsgDelivered
-                                  ? "MESSAGE DELIVERED"
-                                  : (isMsgRead
-                                    ? (act === "messages_client_read" ? "CLIENT READ MSG" : "ADMIN READ MSG")
-                                    : (isMsgHeld
-                                      ? "MESSAGES HELD"
-                                      : (isMsgRetargeted
-                                        ? "MSG RETARGETED"
-                                        : (isMsgCancelled
-                                          ? "MSG CANCELLED"
-                                          : (isSetting
-                                            ? "SETTING UPDATED"
-                                            : (isPlanChange
-                                              ? (act === "plan_created" ? "PLAN CREATED" : "PLAN UPDATED")
-                                              : (isUnbind
-                                                ? "DEVICE UNBOUND"
-                                                : (isBound
-                                                  ? "DEVICE BOUND"
-                                                  : (act === "payment_approved" ? "PAYMENT RENEWAL" : "PAID RENEWAL")))))))))))))))))))));
+          const auditBadgeMap = {
+            reset_plan: { cls: "badge-handover", txt: "HANDOVER RESET" },
+            license_deleted: { cls: "badge-revoked", txt: "LICENSE DELETED" },
+            label_updated: { cls: "badge-owner", txt: "LABEL UPDATED" },
+            revoked: { cls: "badge-revoked", txt: "REVOKED" },
+            reactivated: { cls: "badge-active", txt: "REACTIVATED" },
+            license_created: { cls: "badge-active", txt: "CREATED" },
+            trial_override: { cls: "badge-expired", txt: "TRIAL OVERRIDE" },
+            remote_credentials_provisioned: { cls: "badge-expired", txt: "REMOTE CREDS QUEUED" },
+            remote_credentials_consumed: { cls: "badge-active", txt: "REMOTE CREDS APPLIED" },
+            remote_credentials_rejected: { cls: "badge-revoked", txt: "REMOTE CREDS BLOCKED" },
+            message_sent: { cls: "badge-pending", txt: "MESSAGE SENT" },
+            messages_delivered: { cls: "badge-pending", txt: "MESSAGE DELIVERED" },
+            messages_read: { cls: "badge-pending", txt: "ADMIN READ MSG" },
+            messages_client_read: { cls: "badge-pending", txt: "CLIENT READ MSG" },
+            messages_held_on_unbind: { cls: "badge-expired", txt: "MESSAGES HELD" },
+            message_retargeted: { cls: "badge-owner", txt: "MSG RETARGETED" },
+            message_cancelled: { cls: "badge-revoked", txt: "MSG CANCELLED" },
+            setting_updated: { cls: "badge-owner", txt: "SETTING UPDATED" },
+            plan_created: { cls: "badge-owner", txt: "PLAN CREATED" },
+            plan_updated: { cls: "badge-owner", txt: "PLAN UPDATED" },
+            unbind_device: { cls: "badge-expired", txt: "DEVICE UNBOUND" },
+            device_bound: { cls: "badge-active", txt: "DEVICE BOUND" },
+            payment_approved: { cls: "badge-renew", txt: "PAYMENT RENEWAL" },
+          };
+          const badgeInfo = auditBadgeMap[act] || { cls: "badge-renew", txt: "PAID RENEWAL" };
+          const badgeCls = badgeInfo.cls;
+          const badgeTxt = badgeInfo.txt;
           const planMove = (ev.previous_plan || "—") + " → " + (ev.new_plan || "—");
           return (
             '<div class="audit-row">' +
