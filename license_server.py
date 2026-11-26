@@ -76,7 +76,7 @@ DEFAULT_PLANS = {
     "annual":    {"days": 365, "price_inr": 900, "label": "Annual",                 "sort_order": 30},
     "launch90":  {"days": 90,  "price_inr": 200, "label": "Launch Offer — 90 days", "sort_order": 5},
 }
-# Backward-compatible reference to initial seed plan definitions; runtime routes read `subscription_plans` DB table.
+# Backward-compatible reference to initial seed plan definitions; runtime routes read `subscription_plans` through DB table.
 PLANS = {
     k: {"days": v["days"], "price_inr": v["price_inr"], "label": v["label"]}
     for k, v in DEFAULT_PLANS.items()
