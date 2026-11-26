@@ -689,12 +689,19 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO contact_messages"):
-            lic_key, dev_id, msg_text, client_ts, received_at = params
+            if len(params) == 8:
+                lic_key, dev_id, msg_text, image_data, content_type, att_name, client_ts, received_at = params
+            else:
+                lic_key, dev_id, msg_text, client_ts, received_at = params
+                image_data = content_type = att_name = None
             row = {
                 "id": self.db._next_contact_id,
                 "license_key": lic_key,
                 "device_id": dev_id,
                 "message": msg_text,
+                "image_data": image_data,
+                "content_type": content_type,
+                "attachment_filename": att_name,
                 "client_timestamp": client_ts,
                 "received_at": received_at,
                 "telegram_notified": False,
@@ -703,6 +710,18 @@ class _FakeCursor:
             self.db.contact_messages.append(row)
             self._rows = [{"id": row["id"], "received_at": row["received_at"]}]
             self.rowcount = 1
+            return
+
+        if "FROM licenses WHERE device_id = %s ORDER BY last_seen DESC" in norm:
+            dev_q = params[0]
+            matches = [dict(r) for r in self.db.licenses.values() if r.get("device_id") == dev_q]
+            self._rows = matches[:1]
+            return
+
+        if "FROM contact_messages WHERE id = %s" in norm:
+            mid = int(params[0])
+            m = next((r for r in self.db.contact_messages if r["id"] == mid), None)
+            self._rows = [dict(m)] if m else []
             return
 
         if norm.startswith("UPDATE contact_messages SET telegram_notified = TRUE WHERE id = %s"):
@@ -833,12 +852,17 @@ class _FakeCursor:
             return
 
         if norm.startswith("INSERT INTO license_messages"):
-            if "'client'" in norm:
+            if len(params) == 8 and "'client'" in norm:
+                lic_key, sender_id, target_dev, body_text, created_at, image_data, content_type, att_name = params
+                sender_type, status, idem_key = "client", "received", None
+            elif "'client'" in norm:
                 lic_key, sender_id, target_dev, body_text, idem_key, created_at = params
                 sender_type, status = "client", "received"
+                image_data = content_type = att_name = None
             else:
                 lic_key, sender_id, target_dev, body_text, idem_key, created_at = params
                 sender_type, status = "admin", "queued"
+                image_data = content_type = att_name = None
             row = {
                 "id": self.db._next_message_id,
                 "license_key": lic_key,
@@ -855,6 +879,9 @@ class _FakeCursor:
                 "retargeted_from_device_id": None,
                 "retargeted_by": None,
                 "retargeted_at": None,
+                "image_data": image_data,
+                "content_type": content_type,
+                "attachment_filename": att_name,
             }
             self.db._next_message_id += 1
             self.db.license_messages.append(row)
@@ -1008,6 +1035,10 @@ def env_client(monkeypatch):
         "expires_at": None,
         "has_paid_renewal": False,
     }
+    monkeypatch.setenv("ADMIN_USERNAME", "test-admin-user")
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-password")
+    monkeypatch.setenv("LICENSE_ADMIN_TOKEN", "test-admin-secret")
+    monkeypatch.setattr(srv, "ADMIN_TOKEN", "test-admin-secret")
     monkeypatch.setattr(srv, "get_db", db.connect)
     srv._LOGIN_ATTEMPTS.clear()
     srv.init_db()
@@ -3056,3 +3087,197 @@ def test_device_trials_lookup_and_dashboard_clear_unblocks_stuck_device(env_clie
     ):
         assert required_id in dash_html, f"Missing {required_id} in dashboard.html"
     assert "Clear Trial Record" in dash_html
+
+
+def test_contact_message_multipart_screenshot_attachment_mirrors_to_inbox_and_image_endpoint(env_client, monkeypatch):
+    """
+    Verify simplified Contact Admin multipart screenshot upload:
+      1. Reuses payment-screenshot MIME validation & size limit (rejects bogus MIME with 400).
+      2. Stores base64 image in contact_messages AND mirrors into license_messages (Support Inbox).
+      3. Exposes viewable image via inbox conversation `image_data_uri`, `/api/v1/admin/messages/{id}/image`,
+         and `/api/v1/admin/contact-messages/{id}/image` with exact byte parity.
+      4. Dashboard HTML renders `[data-msg-zoom]` thumbnails inside `renderInboxThread`.
+    """
+    client, db = env_client
+    dev_id = "dev-contact-shot-999999999999999"
+    db.licenses["VIVEK-ANPR-0001"]["device_id"] = dev_id
+
+    # 1. Invalid file magic bytes rejected cleanly with 400
+    r_bad = client.post(
+        "/api/v1/contact-message",
+        data={"license_key": "VIVEK-ANPR-0001", "device_id": dev_id, "message": "Bad file attached"},
+        files={"image": ("fake.png", b"not-a-real-image", "image/png")},
+    )
+    assert r_bad.status_code == 400
+
+    # 2. Valid PNG multipart upload succeeds, mirrors to license_messages, and calls Telegram sendPhoto
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:FAKE_TOKEN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "999888777")
+    tg_calls = []
+
+    def fake_tg_post(url, data=None, files=None, timeout=None):
+        tg_calls.append({"url": url, "data": data, "files": files})
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
+
+    with patch.object(srv.requests, "post", side_effect=fake_tg_post):
+        r_ok = client.post(
+            "/api/v1/contact-message",
+            data={
+                "license_key": "VIVEK-ANPR-0001",
+                "device_id": dev_id,
+                "message": "Gate camera flickering — attached frame.",
+            },
+            files={"image": ("gate_err.png", PNG_1X1, "image/png")},
+        )
+    assert r_ok.status_code == 200, r_ok.text
+    body = r_ok.json()
+    assert body["ok"] is True
+    assert body["has_attachment"] is True
+    assert body["inbox_message_id"] is not None
+    assert len(tg_calls) == 1 and "/sendPhoto" in tg_calls[0]["url"]
+
+    # 3. Verify Inbox conversation & raw image endpoints return exact original PNG bytes
+    conv = client.get("/api/v1/admin/messages/conversation/VIVEK-ANPR-0001", headers=ADMIN_HDR).json()
+    assert len(conv["messages"]) == 1
+    msg = conv["messages"][0]
+    assert msg["has_attachment"] is True
+    assert msg["content_type"] == "image/png"
+    assert msg["attachment_filename"] == "gate_err.png"
+    assert base64.b64decode(msg["image_data_uri"].split(",", 1)[1]) == PNG_1X1
+
+    r_img1 = client.get(f"/api/v1/admin/messages/{msg['id']}/image", headers=ADMIN_HDR)
+    assert r_img1.status_code == 200 and r_img1.content == PNG_1X1
+
+    r_img2 = client.get(f"/api/v1/admin/contact-messages/{body['message_id']}/image", headers=ADMIN_HDR)
+    assert r_img2.status_code == 200 and r_img2.content == PNG_1X1
+
+    # 4. Dashboard HTML renders lightbox-enabled attachment thumbnail in Inbox
+    dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
+    assert "data-msg-zoom" in dash_html and "attachment_filename" in dash_html and "image_data_uri" in dash_html
+
+
+def test_home_online_offline_never_connected_without_altering_license_validity_or_licenses_tab(env_client):
+    """
+    Verify Home-only derived runtime check-in indicator (`Online` / `Offline` / `Never Connected`):
+      1. Default threshold matches desktop client's real recheck interval (2 * 3600s + 300s = 7500s).
+      2. Recent `last_seen` (within threshold) -> `running_status == 'online'` ("Online") on Home.
+      3. Stale `last_seen` (older than threshold) -> `running_status == 'offline'` ("Offline") on Home,
+         while license validity stays `active` on BOTH Home and `/api/v1/admin/list` (Licenses tab)
+         AND `/api/v1/validate` continues returning `active` (no enforcement impact!).
+      4. `last_seen IS NULL` -> `running_status == 'never_connected'` ("Never Connected"), never "Offline".
+      5. Summary exposes explicit counts (`active_licenses`, `online_licenses`, `offline_licenses`,
+         `never_connected_licenses`) without breaking `overall_state == 'all_good'` for legitimately closed apps.
+      6. Licenses tab (`GET /api/v1/admin/list` and `renderLicenses()` in `dashboard.html`) is completely untouched.
+    """
+    client, db = env_client
+    now = datetime.now(timezone.utc)
+
+    # 1. Online license: checked in 5 minutes ago
+    db.licenses["VIVEK-ANPR-0001"]["device_id"] = "dev-online-0001"
+    db.licenses["VIVEK-ANPR-0001"]["label"] = "Gate 1 — Running PC"
+    db.licenses["VIVEK-ANPR-0001"]["last_seen"] = now - timedelta(minutes=5)
+
+    # 2. Offline-but-Active license: checked in 3 hours ago (> 7500s = 2h 5m), still valid for 170 days
+    db.licenses["OFFLINE-ACTIVE-002"] = {
+        "license_key": "OFFLINE-ACTIVE-002",
+        "status": "active",
+        "device_id": "dev-offline-0002",
+        "app_version": "1.1.0",
+        "last_seen": now - timedelta(hours=3),
+        "note": "Closed overnight",
+        "label": "Gate 2 — Closed PC",
+        "plan": "trial",
+        "expires_at": now + timedelta(days=170),
+        "has_paid_renewal": False,
+    }
+
+    # 3. Never Connected license: provisioned, valid, last_seen IS NULL
+    db.licenses["NEVER-CONN-003"] = {
+        "license_key": "NEVER-CONN-003",
+        "status": "active",
+        "device_id": None,
+        "app_version": None,
+        "last_seen": None,
+        "note": "Unactivated spare key",
+        "label": "Gate 3 — Spare Key",
+        "plan": "trial",
+        "expires_at": now + timedelta(days=180),
+        "has_paid_renewal": False,
+    }
+
+    # Fetch Home summary
+    r_sum = client.get("/api/v1/admin/summary", headers=ADMIN_HDR)
+    assert r_sum.status_code == 200
+    summary = r_sum.json()
+
+    assert summary["client_recheck_interval_seconds"] == 3600
+    assert summary["online_threshold_seconds"] == 7500
+    assert summary["overall_state"] == "all_good"
+    assert summary["issues"] == []
+
+    counts = summary["counts"]
+    assert counts["total_licenses"] == 3
+    assert counts["active_licenses"] == 3
+    assert counts["online_licenses"] == 1
+    assert counts["offline_licenses"] == 1
+    assert counts["never_connected_licenses"] == 1
+    assert counts["active_online_licenses"] == 1
+
+    by_key = {x["license_key"]: x for x in summary["licenses"]}
+    assert by_key["VIVEK-ANPR-0001"]["effective_status"] == "active"
+    assert by_key["VIVEK-ANPR-0001"]["running_status"] == "online"
+    assert by_key["VIVEK-ANPR-0001"]["running_status_label"] == "Online"
+    assert 290 <= by_key["VIVEK-ANPR-0001"]["last_seen_age_seconds"] <= 320
+
+    assert by_key["OFFLINE-ACTIVE-002"]["effective_status"] == "active"
+    assert by_key["OFFLINE-ACTIVE-002"]["status"] == "active"
+    assert by_key["OFFLINE-ACTIVE-002"]["running_status"] == "offline"
+    assert by_key["OFFLINE-ACTIVE-002"]["running_status_label"] == "Offline"
+    assert by_key["OFFLINE-ACTIVE-002"]["last_seen_age_seconds"] >= 10790
+
+    assert by_key["NEVER-CONN-003"]["effective_status"] == "active"
+    assert by_key["NEVER-CONN-003"]["running_status"] == "never_connected"
+    assert by_key["NEVER-CONN-003"]["running_status_label"] == "Never Connected"
+    assert by_key["NEVER-CONN-003"]["last_seen_age_seconds"] is None
+
+    # Licenses tab API (`/api/v1/admin/list`) remains purely license validity — NO running_status injection
+    r_list = client.get("/api/v1/admin/list", headers=ADMIN_HDR)
+    assert r_list.status_code == 200
+    list_by_key = {row["license_key"]: row for row in r_list.json()}
+    assert list_by_key["OFFLINE-ACTIVE-002"]["status"] == "active"
+    assert "running_status" not in list_by_key["OFFLINE-ACTIVE-002"]
+    assert list_by_key["VIVEK-ANPR-0001"]["status"] == "active"
+    assert list_by_key["NEVER-CONN-003"]["status"] == "active"
+
+    # Zero enforcement impact: offline license still validates as `active` when app reopens!
+    r_val = client.post(
+        "/api/v1/validate",
+        json={"license_key": "OFFLINE-ACTIVE-002", "device_id": "dev-offline-0002", "app_version": "1.1.0"},
+    )
+    assert r_val.status_code == 200 and r_val.json()["status"] == "active"
+
+    # After that check-in updates `last_seen`, Home summary immediately flips OFFLINE-ACTIVE-002 -> Online!
+    summary_after = client.get("/api/v1/admin/summary", headers=ADMIN_HDR).json()
+    by_key_after = {x["license_key"]: x for x in summary_after["licenses"]}
+    assert by_key_after["OFFLINE-ACTIVE-002"]["running_status"] == "online"
+    assert summary_after["counts"]["online_licenses"] == 2
+    assert summary_after["counts"]["offline_licenses"] == 0
+    assert summary_after["counts"]["never_connected_licenses"] == 1
+
+    # Verify dashboard.html renders Home-only Online/Offline/Never Connected badges while leaving renderLicenses untouched
+    dash_html = (Path(__file__).resolve().parent / "admin_ui" / "dashboard.html").read_text(encoding="utf-8")
+    assert "Currently Online" in dash_html
+    assert "Never Connected" in dash_html
+    assert "data-runtime-summary-chip" in dash_html
+    assert 'id="home-licenses-overview"' in dash_html
+    # Extract renderLicenses() body and confirm zero running_status / badge-online references inside it
+    rl_start = dash_html.index("function renderLicenses()")
+    rl_end = dash_html.index("function issueBadgeClass(", rl_start)
+    render_licenses_src = dash_html[rl_start:rl_end]
+    assert "running_status" not in render_licenses_src
+    assert "renderRunningBadge" not in render_licenses_src
+    assert "Never Connected" not in render_licenses_src
+
+

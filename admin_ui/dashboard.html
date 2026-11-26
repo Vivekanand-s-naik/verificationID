@@ -483,6 +483,73 @@
       color: var(--text-soft);
     }
 
+    .badge-online {
+      background: var(--green-bg);
+      border-color: var(--green-border);
+      color: var(--green-text);
+    }
+
+    .badge-offline {
+      background: #f3f4f6;
+      border-color: #d1d5db;
+      color: #4b5563;
+    }
+
+    .badge-never-connected {
+      background: var(--surface);
+      border: 1px dashed var(--border-strong);
+      color: var(--text-muted);
+    }
+
+    .runtime-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .badge-online .runtime-dot {
+      background: var(--green);
+    }
+
+    .badge-offline .runtime-dot {
+      background: #9ca3af;
+    }
+
+    .badge-never-connected .runtime-dot {
+      background: transparent;
+      border: 1.5px solid #9ca3af;
+    }
+
+    .runtime-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-strong);
+      color: var(--text-soft);
+    }
+
+    .runtime-chip.has-online {
+      background: var(--green-bg);
+      border-color: var(--green-border);
+      color: var(--green-text);
+    }
+
+    .runtime-chip .runtime-dot {
+      background: #9ca3af;
+    }
+
+    .runtime-chip.has-online .runtime-dot {
+      background: var(--green);
+    }
+
     .empty-state {
       background: var(--surface);
       border: 1px dashed var(--border-strong);
@@ -629,7 +696,7 @@
 
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 10px;
     }
 
@@ -2603,6 +2670,56 @@
         return "Info";
       }
 
+      function formatDurationShort(totalSeconds) {
+        if (totalSeconds === null || totalSeconds === undefined || isNaN(Number(totalSeconds))) return "";
+        const secs = Math.max(0, Math.floor(Number(totalSeconds)));
+        const days = Math.floor(secs / 86400);
+        const hrs = Math.floor((secs % 86400) / 3600);
+        const mins = Math.floor((secs % 3600) / 60);
+        const remS = secs % 60;
+        if (days > 0) return hrs > 0 ? (days + "d " + hrs + "h") : (days + "d");
+        if (hrs > 0) return mins > 0 ? (hrs + "h " + mins + "m") : (hrs + "h");
+        if (mins > 0) return mins + "m";
+        return remS + "s";
+      }
+
+      function renderRunningBadge(lic, thresholdSeconds) {
+        const rs = (lic && lic.running_status) || "never_connected";
+        const winTxt = formatDurationShort(thresholdSeconds || 7500);
+        if (rs === "online") {
+          const ageTxt = lic.last_seen_age_seconds !== null && lic.last_seen_age_seconds !== undefined
+            ? formatDurationShort(lic.last_seen_age_seconds) + " ago"
+            : "recently";
+          return (
+            '<span class="badge badge-online" data-running-status="online" title="' +
+            escapeHtml("App checked in " + ageTxt + " (online window: " + winTxt + ")") +
+            '"><span class="runtime-dot" aria-hidden="true"></span>Online</span>'
+          );
+        }
+        if (rs === "offline") {
+          const ageTxt = lic.last_seen_age_seconds !== null && lic.last_seen_age_seconds !== undefined
+            ? formatDurationShort(lic.last_seen_age_seconds) + " ago"
+            : "older than threshold";
+          return (
+            '<span class="badge badge-offline" data-running-status="offline" title="' +
+            escapeHtml("App last checked in " + ageTxt + " (marked offline after " + winTxt + ")") +
+            '"><span class="runtime-dot" aria-hidden="true"></span>Offline</span>'
+          );
+        }
+        return (
+          '<span class="badge badge-never-connected" data-running-status="never_connected" title="App has never checked in with the license server">' +
+          '<span class="runtime-dot" aria-hidden="true"></span>Never Connected</span>'
+        );
+      }
+
+      function renderHomeValidityBadge(effectiveStatus) {
+        const eff = String(effectiveStatus || "active").toLowerCase();
+        if (eff === "revoked") return '<span class="badge badge-revoked">Revoked</span>';
+        if (eff === "expired") return '<span class="badge badge-expired">Expired</span>';
+        if (eff === "expiring_soon") return '<span class="badge badge-expired">Expiring Soon</span>';
+        return '<span class="badge badge-active">Active</span>';
+      }
+
       function renderSummary() {
         const root = document.getElementById("home-summary");
         const pill = document.getElementById("home-pill");
@@ -2616,11 +2733,18 @@
         const isGood = s.overall_state === "all_good";
         const issues = s.issues || [];
         const activeList = s.active_licenses || [];
-        const p = s.primary_license || activeList[0] || null;
+        const allHomeLicenses = Array.isArray(s.licenses) ? s.licenses : activeList;
+        const p = s.primary_license || activeList[0] || allHomeLicenses[0] || null;
+        const onlineThresholdSec = Number(s.online_threshold_seconds || 7500);
+        const thresholdLabel = formatDurationShort(onlineThresholdSec);
 
         const totalLic = Number(c.total_licenses || 0);
         const activeLic = Number(c.active_licenses || 0);
         const expiringSoonLic = Number(c.expiring_soon_licenses || 0);
+        const validLic = activeLic + expiringSoonLic;
+        const onlineLic = Number(c.online_licenses || 0);
+        const offlineLic = Number(c.offline_licenses || 0);
+        const neverConnLic = Number(c.never_connected_licenses || 0);
         const pendingPay = Number(c.pending_payments || 0);
         const approvedMonth = Number(c.approved_payments_this_month || 0);
         const revenueMonth = Number(c.revenue_this_month_inr || 0);
@@ -2642,25 +2766,49 @@
         if (expiringSoonLic > 0) licSubParts.push(expiringSoonLic + " expiring");
         const licSub = licSubParts.join(" · ");
 
+        const onlineSubParts = [];
+        if (offlineLic > 0) onlineSubParts.push(offlineLic + " offline");
+        if (neverConnLic > 0) onlineSubParts.push(neverConnLic + " never connected");
+        if (!onlineSubParts.length) onlineSubParts.push("All apps checked in");
+        onlineSubParts.push(thresholdLabel + " window");
+        const onlineSub = onlineSubParts.join(" · ");
+
         const pendingSub = pendingPay === 0
           ? "Queue clear"
           : (pendingPay === 1 ? "1 awaiting review" : pendingPay + " awaiting review");
 
         const revSub = approvedMonth + " approved this month";
 
+        const runtimeCountsText =
+          onlineLic + " online" +
+          (offlineLic > 0 ? ", " + offlineLic + " offline" : "") +
+          (neverConnLic > 0 ? ", " + neverConnLic + " never connected" : "");
+
+        const primaryRuntimePart = p ? (" " + renderRunningBadge(p, onlineThresholdSec)) : "";
         const summaryLine = isGood
           ? (p
-            ? 'Primary: ' + (p.label ? '<strong>' + escapeHtml(p.label) + '</strong> (' : '') +
+            ? 'All <strong>' + escapeHtml(validLic) + '</strong> ' + (validLic === 1 ? 'license' : 'licenses') +
+              ' valid (license status) · Primary: ' +
+              (p.label ? '<strong>' + escapeHtml(p.label) + '</strong> (' : '') +
               '<span class="mono"><strong>' + escapeHtml(p.license_key) + '</strong></span>' +
-              (p.label ? ')' : '') + ' · ' +
+              (p.label ? ')' : '') + primaryRuntimePart + ' · ' +
               escapeHtml(p.plan_label || p.plan || "Active") +
               (p.expires_date ? ' · valid through <span class="tabular">' + escapeHtml(p.expires_date) + '</span>' : '')
-            : "All licenses operational and payment queue clear.")
-          : (issues.length === 1 ? "1 item requires attention." : escapeHtml(issues.length) + " items require attention.");
+            : "All licenses valid and payment queue clear.")
+          : (
+            (issues.length === 1 ? "1 license/payment item requires attention" : escapeHtml(issues.length) + " license/payment items require attention") +
+            ' · <strong>' + escapeHtml(validLic) + '</strong> valid ' + (validLic === 1 ? 'license' : 'licenses') +
+            ' · ' + escapeHtml(runtimeCountsText)
+          );
 
         const shellClass = isGood ? "home-shell home-good-shell" : "home-shell home-plain-shell";
         const chipClass = isGood ? "status-chip healthy" : "status-chip attention";
         const chipLabel = isGood ? "All Systems Active" : "Needs Attention";
+        const chipTitle = isGood
+          ? "License validity & payment queue are healthy (app online/offline state is tracked separately)"
+          : "One or more licenses or payment submissions need attention (app online/offline state is tracked separately)";
+        const runtimeChipClass = onlineLic > 0 ? "runtime-chip has-online" : "runtime-chip";
+        const runtimeChipLabel = onlineLic + " / " + totalLic + " Currently Online";
 
         const actionPanelHtml = !isGood
           ? (
@@ -2693,18 +2841,25 @@
           )
           : "";
 
-        const activeTableHtml = activeList.length > 0
+        const homeTableMetaParts = [activeLic + " active"];
+        if (expiringSoonLic > 0) homeTableMetaParts.push(expiringSoonLic + " expiring");
+        homeTableMetaParts.push(onlineLic + " online");
+        homeTableMetaParts.push(offlineLic + " offline");
+        if (neverConnLic > 0) homeTableMetaParts.push(neverConnLic + " never connected");
+
+        const activeTableHtml = allHomeLicenses.length > 0
           ? (
-            '<section class="ops-panel">' +
+            '<section class="ops-panel" id="home-licenses-overview">' +
             '<div class="ops-panel-head">' +
-            '<span class="ops-panel-title">Active Licenses</span>' +
-            '<span class="ops-panel-meta">' + escapeHtml(activeList.length) + ' active</span>' +
+            '<span class="ops-panel-title">Licenses — Validity &amp; App Check-In Status</span>' +
+            '<span class="ops-panel-meta">' + escapeHtml(homeTableMetaParts.join(" · ")) + '</span>' +
             '</div>' +
             '<table class="ops-table">' +
             '<thead><tr>' +
             '<th>License / Label</th>' +
             '<th>Plan</th>' +
-            '<th>Status</th>' +
+            '<th>License Status</th>' +
+            '<th>App Status</th>' +
             '<th>Expires</th>' +
             '<th>Remaining</th>' +
             '<th>Device ID</th>' +
@@ -2712,22 +2867,31 @@
             '<th>Note</th>' +
             '</tr></thead>' +
             '<tbody>' +
-            activeList.map(function (lic) {
-              const remStr = lic.days_remaining !== null && lic.days_remaining !== undefined
-                ? lic.days_remaining + "d left"
-                : "Active";
+            allHomeLicenses.map(function (lic) {
+              const eff = String(lic.effective_status || "active").toLowerCase();
+              const remStr = (eff === "revoked")
+                ? "Revoked"
+                : (eff === "expired")
+                  ? "Expired"
+                  : (lic.days_remaining !== null && lic.days_remaining !== undefined
+                    ? lic.days_remaining + "d left"
+                    : "Active");
               const labelPart = lic.label
                 ? '<div style="font-weight:600; color:var(--text); margin-bottom:2px;">' + escapeHtml(lic.label) + '</div>'
                 : '';
+              const lastSeenStr = lic.last_seen
+                ? escapeHtml(formatDate(lic.last_seen))
+                : '<span style="color:var(--text-muted);">Never</span>';
               return (
-                '<tr>' +
+                '<tr data-home-license-key="' + escapeHtml(lic.license_key) + '">' +
                 '<td data-label="License / Label">' + labelPart + '<strong class="mono">' + escapeHtml(lic.license_key) + '</strong></td>' +
                 '<td data-label="Plan">' + escapeHtml(lic.plan_label || lic.plan || "—") + '</td>' +
-                '<td data-label="Status"><span class="badge badge-active">Active</span></td>' +
+                '<td data-label="License Status">' + renderHomeValidityBadge(eff) + '</td>' +
+                '<td data-label="App Status">' + renderRunningBadge(lic, onlineThresholdSec) + '</td>' +
                 '<td data-label="Expires" class="tabular">' + escapeHtml(lic.expires_date || "—") + '</td>' +
                 '<td data-label="Remaining" class="tabular">' + escapeHtml(remStr) + '</td>' +
                 '<td data-label="Device ID"><span class="mono">' + escapeHtml(lic.device_id || "—") + '</span></td>' +
-                '<td data-label="Last Seen" class="tabular">' + escapeHtml(formatDate(lic.last_seen)) + '</td>' +
+                '<td data-label="Last Seen" class="tabular">' + lastSeenStr + '</td>' +
                 '<td data-label="Note">' + escapeHtml(lic.note || "—") + '</td>' +
                 '</tr>'
               );
@@ -2742,7 +2906,8 @@
           '<div class="' + shellClass + '" data-home-state="' + (isGood ? "all_good" : "needs_attention") + '">' +
           '<div class="status-strip">' +
           '<div class="status-strip-left">' +
-          '<span class="' + chipClass + '"><span class="status-dot" aria-hidden="true"></span><span>' + chipLabel + '</span></span>' +
+          '<span class="' + chipClass + '" title="' + escapeHtml(chipTitle) + '"><span class="status-dot" aria-hidden="true"></span><span>' + chipLabel + '</span></span>' +
+          '<span class="' + runtimeChipClass + '" data-runtime-summary-chip title="' + escapeHtml("Apps that checked in within the last " + thresholdLabel + " (2× hourly client recheck + 5m grace)") + '"><span class="runtime-dot" aria-hidden="true"></span><span>' + escapeHtml(runtimeChipLabel) + '</span></span>' +
           '<span class="status-summary-line">' + summaryLine + '</span>' +
           '</div>' +
           '<div class="status-updated">Checked ' + escapeHtml(formatDate(s.generated_at)) + '</div>' +
@@ -2757,6 +2922,11 @@
           '<div class="kpi-label">Total Licenses</div>' +
           '<div class="kpi-value">' + escapeHtml(totalLic) + '</div>' +
           '<div class="kpi-sub">' + escapeHtml(licSub) + '</div>' +
+          '</div>' +
+          '<div class="kpi-card" id="home-kpi-online">' +
+          '<div class="kpi-label">Currently Online</div>' +
+          '<div class="kpi-value">' + escapeHtml(onlineLic) + ' / ' + escapeHtml(totalLic) + '</div>' +
+          '<div class="kpi-sub">' + escapeHtml(onlineSub) + '</div>' +
           '</div>' +
           '<div class="kpi-card">' +
           '<div class="kpi-label">Pending Payments</div>' +
@@ -3622,6 +3792,18 @@
                 '</div>';
             }
 
+            const imgUri = safeDataUri(m.image_data_uri);
+            const attachmentHtml = imgUri
+              ? '<div class="thumb-wrap" style="margin-top:8px; max-width:340px;">' +
+                '<img class="thumb-img" style="max-height:200px;" src="' + imgUri + '" alt="' +
+                escapeHtml(m.attachment_filename || ("Message attachment #" + m.id)) +
+                '" data-msg-zoom="' + escapeHtml(m.id) + '" />' +
+                '<div class="thumb-hint">' +
+                escapeHtml(m.attachment_filename ? m.attachment_filename + " — Click image to enlarge" : "Click image to enlarge") +
+                '</div>' +
+                '</div>'
+              : '';
+
             return (
               '<div class="' + cls + '" data-msg-id="' + escapeHtml(m.id) + '">' +
               '<div class="msg-bubble-head">' +
@@ -3629,6 +3811,7 @@
               '<span class="badge ' + sm.cls + '">' + escapeHtml(sm.label) + '</span>' +
               '</div>' +
               '<div class="msg-body">' + escapeHtml(m.body) + '</div>' +
+              attachmentHtml +
               '<div class="msg-timestamps">' + tsParts.join("") + '</div>' +
               heldControls +
               '</div>'
@@ -4632,6 +4815,22 @@
       const inboxFeedEl = document.getElementById("inbox-thread-messages");
       if (inboxFeedEl) {
         inboxFeedEl.addEventListener("click", async function (evt) {
+          const zoomImg = evt.target.closest("[data-msg-zoom]");
+          if (zoomImg) {
+            const msgId = Number(zoomImg.dataset.msgZoom);
+            const msgs = (state.selectedConversation && state.selectedConversation.messages) || [];
+            const found = msgs.find(function (m) { return Number(m.id) === msgId; });
+            const src = found && safeDataUri(found.image_data_uri);
+            if (found && src) {
+              document.getElementById("lightbox-title").textContent =
+                "Attachment — Message #" + found.id + " (" + (found.license_key || "") + ")";
+              document.getElementById("lightbox-img").src = src;
+              document.getElementById("lightbox-raw-link").href =
+                "/api/v1/admin/messages/" + encodeURIComponent(found.id) + "/image";
+              document.getElementById("lightbox").classList.add("open");
+            }
+            return;
+          }
           const btn = evt.target.closest("button[data-msg-retarget]");
           if (!btn) return;
           const msgId = Number(btn.dataset.msgId);

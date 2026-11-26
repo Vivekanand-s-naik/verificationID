@@ -33,6 +33,10 @@ ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN")
 
 TRIAL_DAYS = 180
 OFFLINE_LEASE_GRACE_HOURS = 72
+# Client periodic license recheck interval (matches desktop app's LICENSE_RECHECK_INTERVAL_SECONDS = 3600)
+CLIENT_LICENSE_RECHECK_INTERVAL_SECONDS = 3600
+# Grace margin added to 2x client recheck interval for network jitter / Render cold starts (5 minutes)
+ONLINE_GRACE_MARGIN_SECONDS = 300
 SCREENSHOT_RATE_LIMIT_MINUTES = 10
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024  # 5 MB
 CONTACT_MESSAGE_RATE_LIMIT_MINUTES = 2
@@ -98,6 +102,57 @@ def _as_utc(dt: datetime | None) -> datetime | None:
 def _iso_utc(dt: datetime | None) -> str | None:
     aware = _as_utc(dt)
     return aware.isoformat() if aware is not None else None
+
+
+def _get_online_threshold_seconds() -> tuple[int, int]:
+    """
+    Return `(client_recheck_interval_seconds, online_threshold_seconds)` used purely for
+    Home-page runtime check-in visibility (never for license validity enforcement).
+    Default threshold = 2 * client_recheck_interval (3600s) + grace margin (300s) = 7500s (2h 5m).
+    """
+    try:
+        recheck_s = max(
+            5,
+            int(os.environ.get("CLIENT_LICENSE_RECHECK_INTERVAL_SECONDS", str(CLIENT_LICENSE_RECHECK_INTERVAL_SECONDS))),
+        )
+    except ValueError:
+        recheck_s = CLIENT_LICENSE_RECHECK_INTERVAL_SECONDS
+
+    try:
+        grace_s = max(
+            0,
+            int(os.environ.get("ONLINE_GRACE_MARGIN_SECONDS", str(ONLINE_GRACE_MARGIN_SECONDS))),
+        )
+    except ValueError:
+        grace_s = ONLINE_GRACE_MARGIN_SECONDS
+
+    override = os.environ.get("ONLINE_THRESHOLD_SECONDS")
+    if override is not None and str(override).strip():
+        try:
+            return recheck_s, max(1, int(str(override).strip()))
+        except ValueError:
+            pass
+    return recheck_s, (2 * recheck_s) + grace_s
+
+
+def _compute_running_status(
+    last_seen: datetime | None,
+    now: datetime,
+    threshold_seconds: int,
+) -> tuple[str, str, int | None]:
+    """
+    Derive runtime connectivity from `last_seen` recency without altering license validity:
+      - `last_seen IS NULL`               -> ("never_connected", "Never Connected", None)
+      - `(now - last_seen) <= threshold` -> ("online", "Online", age_seconds)
+      - `(now - last_seen) > threshold`  -> ("offline", "Offline", age_seconds)
+    """
+    seen_dt = _as_utc(last_seen)
+    if seen_dt is None:
+        return "never_connected", "Never Connected", None
+    age_s = max(0, int((now - seen_dt).total_seconds()))
+    if age_s <= threshold_seconds:
+        return "online", "Online", age_s
+    return "offline", "Offline", age_s
 
 
 @contextmanager
@@ -330,11 +385,17 @@ def init_db():
                     license_key TEXT,
                     device_id TEXT NOT NULL,
                     message TEXT NOT NULL,
+                    image_data TEXT,
+                    content_type TEXT,
+                    attachment_filename TEXT,
                     client_timestamp TIMESTAMPTZ,
                     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     telegram_notified BOOLEAN NOT NULL DEFAULT FALSE
                 )
             """)
+            cur.execute("ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS image_data TEXT")
+            cur.execute("ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS content_type TEXT")
+            cur.execute("ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS attachment_filename TEXT")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_contact_messages_device_time
                 ON contact_messages (device_id, received_at DESC)
@@ -393,9 +454,15 @@ def init_db():
                     read_by TEXT,
                     retargeted_from_device_id TEXT,
                     retargeted_by TEXT,
-                    retargeted_at TIMESTAMPTZ
+                    retargeted_at TIMESTAMPTZ,
+                    image_data TEXT,
+                    content_type TEXT,
+                    attachment_filename TEXT
                 )
             """)
+            cur.execute("ALTER TABLE license_messages ADD COLUMN IF NOT EXISTS image_data TEXT")
+            cur.execute("ALTER TABLE license_messages ADD COLUMN IF NOT EXISTS content_type TEXT")
+            cur.execute("ALTER TABLE license_messages ADD COLUMN IF NOT EXISTS attachment_filename TEXT")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_license_messages_key_created
                 ON license_messages (license_key, created_at ASC, id ASC)
@@ -1032,6 +1099,8 @@ def _sanitize_operator_name(raw_name: str | None) -> str | None:
 
 
 def _serialize_license_message(row: dict) -> dict:
+    b64 = row.get("image_data")
+    mime = row.get("content_type") or ("image/png" if b64 else None)
     return {
         "id": int(row["id"]),
         "license_key": str(row["license_key"]),
@@ -1048,6 +1117,10 @@ def _serialize_license_message(row: dict) -> dict:
         "retargeted_from_device_id": row.get("retargeted_from_device_id"),
         "retargeted_by": row.get("retargeted_by"),
         "retargeted_at": _iso_utc(row.get("retargeted_at")),
+        "has_attachment": bool(b64),
+        "content_type": mime if b64 else None,
+        "attachment_filename": row.get("attachment_filename") if b64 else None,
+        "image_data_uri": f"data:{mime};base64,{b64}" if b64 else None,
     }
 
 
@@ -1608,11 +1681,13 @@ def _send_telegram_contact_message(
     device_id: str,
     message_text: str,
     received_at: datetime,
+    image_bytes: bytes | None = None,
+    content_type: str | None = None,
 ) -> bool:
     """
-    Relay a client "Contact Admin" support message immediately to the owner's Telegram chat ONLY
-    (via TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from server env vars — never broadcast to
-    vehicle-alert subscribers).
+    Relay a client "Contact Admin" support message (and optional screenshot attachment)
+    immediately to the owner's Telegram chat ONLY (via TELEGRAM_BOT_TOKEN and
+    TELEGRAM_CHAT_ID from server env vars — never broadcast to vehicle-alert subscribers).
     """
     bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
@@ -1626,10 +1701,24 @@ def _send_telegram_contact_message(
         f"{message_text}\n\n"
         f"Ref #{message_id} • {received_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     try:
+        if image_bytes:
+            mime = content_type or "image/png"
+            ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(mime, "png")
+            caption = text if len(text) <= 1020 else (text[:1017] + "...")
+            resp = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"photo": (f"contact_{message_id}.{ext}", image_bytes, mime)},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                return True
+            logger.warning("Telegram contact sendPhoto returned HTTP %s: %s", resp.status_code, resp.text[:200])
+            return False
+
         resp = requests.post(
-            url,
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
             data={"chat_id": chat_id, "text": text},
             timeout=15,
         )
@@ -2495,16 +2584,65 @@ def sync_device_rbac_accounts(req: SyncDeviceRbacRequest):
 
 
 @app.post("/api/v1/contact-message")
-def submit_contact_message(req: ContactMessageRequest):
+async def submit_contact_message(request: Request):
     """
-    Public two-way contact endpoint for desktop clients ("Contact Admin" dialog).
-    Rate-limited to max 1 message per 2 minutes per device_id, persisted in the
-    dedicated `contact_messages` table (separate from `payment_submissions`),
-    and relayed immediately to the owner's Telegram chat only.
+    Public contact endpoint for desktop clients ("Contact Admin" popup dialog).
+    Accepts BOTH:
+      - `multipart/form-data` with optional `image` screenshot upload (reusing the exact
+        payment-screenshot validation + base64 storage pattern: PNG/JPEG/WebP, <= 5 MB)
+      - Legacy `application/json` payloads (`ContactMessageRequest`) for backward compatibility.
+
+    Rate-limited to max 1 message per 2 minutes per device_id, stored in `contact_messages`,
+    mirrored into the license server Support Inbox (`license_messages`) whenever the sender
+    resolves to an activated license (by license_key or bound device_id), and relayed to the
+    owner's Telegram chat.
     """
-    msg_text = (req.message or "").strip()
-    dev_id = (req.device_id or "").strip()
-    lic_key = (req.license_key or "").strip() or None
+    ctype = (request.headers.get("content-type") or "").lower()
+    raw_msg = ""
+    raw_dev = ""
+    raw_key: str | None = None
+    raw_ts_in: str | None = None
+    raw_image_bytes: bytes | None = None
+    image_mime: str | None = None
+    attachment_filename: str | None = None
+
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        raw_msg = str(form.get("message") or "")
+        raw_dev = str(form.get("device_id") or "")
+        raw_key = str(form.get("license_key") or "").strip() or None
+        raw_ts_in = str(form.get("timestamp") or "").strip() or None
+        upload = form.get("image")
+        if upload is not None and hasattr(upload, "read"):
+            raw_image_bytes = await upload.read(MAX_SCREENSHOT_BYTES + 1)
+            if not raw_image_bytes:
+                raise HTTPException(status_code=400, detail="Uploaded screenshot image is empty.")
+            if len(raw_image_bytes) > MAX_SCREENSHOT_BYTES:
+                raise HTTPException(status_code=413, detail="Screenshot file exceeds the 5 MB limit.")
+            image_mime = _detect_image_mime(raw_image_bytes)
+            if image_mime is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unsupported image format. Upload a PNG, JPEG, or WebP screenshot.",
+                )
+            raw_name = str(getattr(upload, "filename", "") or "").strip()
+            safe_name = Path(raw_name).name[:128] if raw_name else f"attachment.{image_mime.split('/')[-1]}"
+            attachment_filename = "".join(ch for ch in safe_name if ch.isprintable() and ch not in "\r\n\t") or "screenshot.png"
+    else:
+        try:
+            body_json = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid request body.")
+        if not isinstance(body_json, dict):
+            raise HTTPException(status_code=400, detail="Invalid JSON object.")
+        raw_msg = str(body_json.get("message") or "")
+        raw_dev = str(body_json.get("device_id") or "")
+        raw_key = str(body_json.get("license_key") or "").strip() or None
+        raw_ts_in = str(body_json.get("timestamp") or "").strip() or None
+
+    msg_text = raw_msg.strip()
+    dev_id = raw_dev.strip()
+    lic_key = raw_key
 
     if len(dev_id) < 4:
         raise HTTPException(status_code=400, detail="Valid device_id is required.")
@@ -2517,16 +2655,20 @@ def submit_contact_message(req: ContactMessageRequest):
         )
 
     client_ts: datetime | None = None
-    if req.timestamp:
+    if raw_ts_in:
         try:
-            raw_ts = req.timestamp.strip()
+            raw_ts = raw_ts_in.strip()
             if raw_ts.endswith("Z"):
                 raw_ts = raw_ts[:-1] + "+00:00"
             client_ts = _as_utc(datetime.fromisoformat(raw_ts))
         except ValueError:
             client_ts = None
 
+    b64_image = base64.b64encode(raw_image_bytes).decode("ascii") if raw_image_bytes else None
     now = _utc_now()
+    inbox_msg_id: int | None = None
+    resolved_lic_key: str | None = lic_key
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -2555,26 +2697,77 @@ def submit_contact_message(req: ContactMessageRequest):
                             ),
                         )
 
+            # Resolve sender's authorized license row (by explicit license_key + device binding,
+            # or fallback lookup by bound device_id) so the message + attachment appear directly
+            # in the Support Inbox under the exact client license.
+            lic_row = None
+            if lic_key:
+                cur.execute(
+                    "SELECT license_key, device_id FROM licenses WHERE license_key = %s",
+                    (lic_key,),
+                )
+                cand = cur.fetchone()
+                if cand is not None:
+                    bound = (cand.get("device_id") or "").strip()
+                    if (not bound) or bound == dev_id:
+                        lic_row = cand
+            if lic_row is None:
+                cur.execute(
+                    "SELECT license_key, device_id FROM licenses WHERE device_id = %s ORDER BY last_seen DESC NULLS LAST LIMIT 1",
+                    (dev_id,),
+                )
+                lic_row = cur.fetchone()
+            if lic_row is not None:
+                resolved_lic_key = str(lic_row["license_key"])
+
             cur.execute(
                 """
                 INSERT INTO contact_messages (
-                    license_key, device_id, message, client_timestamp, received_at, telegram_notified
+                    license_key, device_id, message, image_data, content_type, attachment_filename,
+                    client_timestamp, received_at, telegram_notified
                 )
-                VALUES (%s, %s, %s, %s, %s, FALSE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
                 RETURNING id, received_at
                 """,
-                (lic_key, dev_id, msg_text, client_ts, now),
+                (resolved_lic_key, dev_id, msg_text, b64_image, image_mime, attachment_filename, client_ts, now),
             )
             inserted = cur.fetchone()
             msg_id = int(inserted["id"])
             received_at = _as_utc(inserted.get("received_at")) or now
 
+            if lic_row is not None:
+                sender_identity = f"Contact Admin (device:{dev_id[:12]})"
+                cur.execute(
+                    """
+                    INSERT INTO license_messages (
+                        license_key, sender_type, sender_identity, target_device_id,
+                        body, status, created_at, image_data, content_type, attachment_filename
+                    )
+                    VALUES (%s, 'client', %s, %s, %s, 'received', %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        resolved_lic_key,
+                        sender_identity,
+                        dev_id,
+                        msg_text,
+                        now,
+                        b64_image,
+                        image_mime,
+                        attachment_filename,
+                    ),
+                )
+                inbox_row = cur.fetchone()
+                inbox_msg_id = int(inbox_row["id"]) if inbox_row else None
+
     notified = _send_telegram_contact_message(
         message_id=msg_id,
-        license_key=lic_key,
+        license_key=resolved_lic_key,
         device_id=dev_id,
         message_text=msg_text,
         received_at=received_at,
+        image_bytes=raw_image_bytes,
+        content_type=image_mime,
     )
     if notified:
         with get_db() as conn:
@@ -2585,16 +2778,20 @@ def submit_contact_message(req: ContactMessageRequest):
                 )
 
     logger.info(
-        "[CONTACT MESSAGE] id=%s key=%s device=%s len=%d telegram=%s",
+        "[CONTACT MESSAGE] id=%s inbox_id=%s key=%s device=%s len=%d has_attachment=%s telegram=%s",
         msg_id,
-        lic_key or "unregistered",
+        inbox_msg_id,
+        resolved_lic_key or "unregistered",
         dev_id[:12],
         len(msg_text),
+        bool(b64_image),
         notified,
     )
     return {
         "ok": True,
         "message_id": msg_id,
+        "inbox_message_id": inbox_msg_id,
+        "has_attachment": bool(b64_image),
         "received_at": received_at.isoformat(),
         "telegram_notified": notified,
         "detail": "Message sent — we'll get back to you soon.",
@@ -4094,6 +4291,7 @@ def admin_dashboard_summary(
     transferring base64 payment screenshot blobs.
     """
     now = _utc_now()
+    client_recheck_s, online_threshold_s = _get_online_threshold_seconds()
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -4127,6 +4325,10 @@ def admin_dashboard_summary(
         "expiring_soon_licenses": 0,
         "expired_licenses": 0,
         "revoked_licenses": 0,
+        "online_licenses": 0,
+        "offline_licenses": 0,
+        "never_connected_licenses": 0,
+        "active_online_licenses": 0,
         "pending_payments": 0,
         "approved_payments_this_month": 0,
         "revenue_this_month_inr": 0,
@@ -4138,6 +4340,15 @@ def admin_dashboard_summary(
         plan = (row.get("plan") or "trial").strip().lower()
         exp_dt = _as_utc(row.get("expires_at"))
         days_rem = _compute_days_remaining(exp_dt, now)
+        run_status, run_label, last_seen_age_s = _compute_running_status(
+            row.get("last_seen"), now, online_threshold_s
+        )
+        if run_status == "online":
+            counts["online_licenses"] += 1
+        elif run_status == "offline":
+            counts["offline_licenses"] += 1
+        else:
+            counts["never_connected_licenses"] += 1
 
         if raw_status == "revoked":
             eff = "revoked"
@@ -4166,6 +4377,8 @@ def admin_dashboard_summary(
         elif days_rem is not None and days_rem <= warning_days:
             eff = "expiring_soon"
             counts["expiring_soon_licenses"] += 1
+            if run_status == "online":
+                counts["active_online_licenses"] += 1
             unit = "day" if days_rem == 1 else "days"
             issues.append({
                 "type": "expiring_soon",
@@ -4179,11 +4392,16 @@ def admin_dashboard_summary(
         else:
             eff = "active"
             counts["active_licenses"] += 1
+            if run_status == "online":
+                counts["active_online_licenses"] += 1
 
         item = {
             "license_key": key,
             "status": raw_status,
             "effective_status": eff,
+            "running_status": run_status,
+            "running_status_label": run_label,
+            "last_seen_age_seconds": last_seen_age_s,
             "plan": plan,
             "plan_label": _plan_display_label(plan, all_plans),
             "expires_at": _iso_utc(exp_dt),
@@ -4256,8 +4474,11 @@ def admin_dashboard_summary(
         "primary_license": primary_license,
         "issues": issues,
         "active_licenses": active_licenses,
+        "licenses": enriched_all,
         "counts": counts,
         "warning_days": warning_days,
+        "client_recheck_interval_seconds": client_recheck_s,
+        "online_threshold_seconds": online_threshold_s,
         "generated_at": now.isoformat(),
     }
 
@@ -4579,12 +4800,13 @@ def list_contact_messages(
     limit: int = Query(default=50, ge=1, le=200),
     _auth: dict = Depends(_require_admin_api),
 ):
-    """Admin-only: list support messages submitted from desktop apps (separate from payment submissions)."""
+    """Admin-only: list support messages submitted from desktop apps (with optional screenshot attachment)."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, license_key, device_id, message, client_timestamp, received_at, telegram_notified
+                SELECT id, license_key, device_id, message, image_data, content_type,
+                       attachment_filename, client_timestamp, received_at, telegram_notified
                 FROM contact_messages
                 ORDER BY received_at DESC, id DESC
                 LIMIT %s
@@ -4592,18 +4814,43 @@ def list_contact_messages(
                 (limit,),
             )
             rows = cur.fetchall()
-    return [
-        {
+    out = []
+    for r in rows:
+        b64 = r.get("image_data")
+        mime = r.get("content_type") or ("image/png" if b64 else None)
+        out.append({
             "id": int(r["id"]),
             "license_key": r.get("license_key"),
             "device_id": str(r["device_id"]),
             "message": str(r["message"]),
+            "has_attachment": bool(b64),
+            "content_type": mime if b64 else None,
+            "attachment_filename": r.get("attachment_filename") if b64 else None,
+            "image_data_uri": f"data:{mime};base64,{b64}" if b64 else None,
             "client_timestamp": _iso_utc(r.get("client_timestamp")),
             "received_at": _iso_utc(r.get("received_at")),
             "telegram_notified": bool(r.get("telegram_notified", False)),
-        }
-        for r in rows
-    ]
+        })
+    return out
+
+
+@app.get("/api/v1/admin/contact-messages/{message_id}/image")
+def view_contact_message_image(
+    message_id: int,
+    _auth: dict = Depends(_require_admin_api),
+):
+    """Return the raw decoded screenshot attached to a contact message."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT image_data, content_type FROM contact_messages WHERE id = %s",
+                (message_id,),
+            )
+            row = cur.fetchone()
+            if row is None or not row.get("image_data"):
+                raise HTTPException(status_code=404, detail="Attachment not found")
+    raw = base64.b64decode(row["image_data"])
+    return Response(content=raw, media_type=row.get("content_type") or "image/png")
 
 
 @app.get("/api/v1/admin/credential-provisions")
@@ -5295,7 +5542,8 @@ def admin_list_messages_inbox(
             cur.execute(
                 """
                 SELECT id, license_key, sender_type, sender_identity, target_device_id,
-                       body, status, created_at, delivered_at, read_at
+                       body, status, created_at, delivered_at, read_at,
+                       (image_data IS NOT NULL) AS has_attachment
                 FROM license_messages
                 ORDER BY created_at ASC, id ASC
                 """
@@ -5348,6 +5596,8 @@ def admin_list_messages_inbox(
         if (created_dt, mid) >= (entry["_sort_ts"], entry["_sort_id"]):
             raw_body = str(m.get("body") or "")
             preview = raw_body if len(raw_body) <= 120 else raw_body[:117] + "..."
+            if m.get("has_attachment"):
+                preview = "[Image] " + preview
             entry["_sort_ts"] = created_dt
             entry["_sort_id"] = mid
             entry["last_message_id"] = mid
@@ -5355,6 +5605,7 @@ def admin_list_messages_inbox(
             entry["last_sender_type"] = stype
             entry["last_message_status"] = st
             entry["last_activity_at"] = created_dt.isoformat()
+            entry["last_has_attachment"] = bool(m.get("has_attachment", False))
 
     all_convs = sorted(
         threads.values(),
@@ -5462,7 +5713,8 @@ def admin_get_conversation(
                 """
                 SELECT id, license_key, sender_type, sender_identity, target_device_id,
                        body, status, idempotency_key, created_at, delivered_at, read_at, read_by,
-                       retargeted_from_device_id, retargeted_by, retargeted_at
+                       retargeted_from_device_id, retargeted_by, retargeted_at,
+                       image_data, content_type, attachment_filename
                 FROM license_messages
                 WHERE license_key = %s
                 ORDER BY created_at ASC, id ASC
@@ -5487,6 +5739,25 @@ def admin_get_conversation(
         "messages": messages,
         "marked_read_ids": marked_read_ids,
     }
+
+
+@app.get("/api/v1/admin/messages/{message_id}/image")
+def view_license_message_image(
+    message_id: int,
+    _auth: dict = Depends(_require_admin_api),
+):
+    """Admin-only: return the raw decoded screenshot attached to an inbox message."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT image_data, content_type FROM license_messages WHERE id = %s",
+                (message_id,),
+            )
+            row = cur.fetchone()
+            if row is None or not row.get("image_data"):
+                raise HTTPException(status_code=404, detail="Attachment not found")
+    raw = base64.b64decode(row["image_data"])
+    return Response(content=raw, media_type=row.get("content_type") or "image/png")
 
 
 @app.post("/api/v1/admin/messages/send")
